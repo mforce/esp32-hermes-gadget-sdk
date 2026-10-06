@@ -267,9 +267,14 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             logger.warning("[%s] authorization check failed for %s", self.name, device_id, exc_info=True)
             return False
 
+    def _owner_bound(self, session: DeviceSession) -> bool:
+        """Devices held to the default profile's verdict: those that can switch, and any this plugin
+        approved in another profile, whatever they claim in a later hello."""
+        return session.caps.get("profiles") is True or self._store.granted(session.device_id)
+
     def _verdict(self, session: DeviceSession) -> Optional[bool]:
-        """Capable devices answer to the default profile alone; legacy ones keep the routed check."""
-        if session.caps.get("profiles") is True:
+        """Owner-bound devices answer to the default profile alone; others keep the routed check."""
+        if self._owner_bound(session):
             return self._owner_trusts(session.device_id)
         return self._authorized(session.device_id)
 
@@ -284,8 +289,10 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             return "unpaired"
         if self._busy(session.device_id):
             return "busy"
-        if profile != "default" and not await asyncio.to_thread(self._grant, session.device_id, session.name, profile):
-            return "unpaired"
+        if profile != "default":
+            if not await asyncio.to_thread(self._grant, session.device_id, session.name, profile):
+                return "unpaired"
+            self._store.record_grant(session.device_id, profile)
         if not self._still_trusted(session):  # revoked or replaced while the grant ran
             return "unpaired"
         session.profile = profile
@@ -337,9 +344,12 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             return
         # Hermes answers an unauthorized DM with a pairing code (rate limited per sender);
         # send() recognises it and forwards it to the device as a pairing frame.
+        source = self._source(session)
+        if self._owner_bound(session):
+            source.profile = "default"  # pairing happens in the default profile, whatever a route says
         await self.handle_message(MessageEvent(
             text=PAIRING_TRIGGER, message_type=MessageType.TEXT,
-            source=self._source(session), message_id=self._message_id(session, "pair")))
+            source=source, message_id=self._message_id(session, "pair")))
         session.spawn(self._pairing_grace(session))
 
     async def _pairing_grace(self, session: DeviceSession) -> None:
@@ -477,28 +487,39 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             text=text, source=self._source(session), message_id=self._message_id(session, msg_id),
             user_id=session.device_id, user_name=session.name, channel_prompt=session.prompt_context(), **kw)
 
+    async def _forward(self, session: DeviceSession, event: MessageEvent) -> None:
+        """Hand a device message to Hermes. Work for another profile needs the default profile's live
+        trust and the current connection, so neither a revoked device nor a replaced connection still
+        finishing an upload reaches a profile through an approval this plugin made there."""
+        if (event.source.profile not in (None, "default") and self._owner_bound(session)
+                and not self._still_trusted(session)):
+            logger.info("[%s] dropped a message from %s for profile %s: not trusted by the default profile",
+                        self.name, session.device_id, event.source.profile)
+            return
+        await self.handle_message(event)
+
     async def on_text(self, session: DeviceSession, msg_id: str, text: str) -> None:
-        await self.handle_message(self._event(session, msg_id, text, message_type=MessageType.TEXT))
+        await self._forward(session, self._event(session, msg_id, text, message_type=MessageType.TEXT))
 
     async def on_utterance(self, session: DeviceSession, msg_id: str, wav: bytes, seconds: float) -> None:
         path = await cache_audio_from_bytes_async(wav, ".wav")
         logger.debug("[%s] %.1fs utterance from %s -> %s", self.name, seconds, session.device_id, path)
-        await self.handle_message(self._event(
+        await self._forward(session, self._event(
             session, msg_id, "", message_type=MessageType.VOICE, media_urls=[path], media_types=["audio/wav"]))
 
     async def on_cancel(self, session: DeviceSession) -> None:
-        await self.handle_message(self._event(session, "cancel", "/stop", message_type=MessageType.TEXT))
+        await self._forward(session, self._event(session, "cancel", "/stop", message_type=MessageType.TEXT))
 
     async def on_new_session(self, session: DeviceSession) -> None:
         self._new_requested[session.device_id] = time.monotonic()
-        await self.handle_message(self._event(session, "new", "/new", message_type=MessageType.TEXT))
+        await self._forward(session, self._event(session, "new", "/new", message_type=MessageType.TEXT))
 
     async def on_event(self, session: DeviceSession, name: str, data: Any, notify: bool) -> None:
         logger.info("[%s] event from %s: %s %s", self.name, session.device_id, name, data)
         if not notify:
             return
         payload = json.dumps(data, separators=(",", ":"))[:500] if data is not None else ""
-        await self.handle_message(self._event(
+        await self._forward(session, self._event(
             session, f"ev-{uuid.uuid4().hex[:6]}", f"[Gadget event] {name} {payload}".strip(),
             message_type=MessageType.TEXT, allow_gateway_control=False))
 
@@ -652,7 +673,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             await self._show_prompt(session)
 
     async def on_prompt_reply(self, session: DeviceSession, prompt_id: str, yes: bool) -> None:
-        if not session.paired or (session.caps.get("profiles") is True and not self._still_trusted(session)):
+        if not session.paired or (self._owner_bound(session) and not self._still_trusted(session)):
             return
         prompt = self._take_prompt(session.device_id, prompt_id)
         if prompt is None or prompt.expired():

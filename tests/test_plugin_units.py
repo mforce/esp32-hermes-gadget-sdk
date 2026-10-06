@@ -134,3 +134,12 @@ def test_an_unapproved_device_expires_and_an_approved_one_stays(tmp_path, monkey
     assert store.key_for("hg-0123456789abcdef") is None, "an unapproved record is gone after its TTL"
     assert "hg-0123456789abcdef" not in store.devices()
     assert store.key_for("hg-fedcba9876543210") == b"j" * 32, "an approved record stays"
+
+
+def test_profile_grants_persist_and_survive_forget(tmp_path):
+    store = DeviceStore(tmp_path)
+    store.enroll("hg-0123456789abcdef", b"k" * 32)
+    assert not store.granted("hg-0123456789abcdef")
+    store.record_grant("hg-0123456789abcdef", "ops")
+    store.forget("hg-0123456789abcdef")  # resets the key; it is not a revocation
+    assert DeviceStore(tmp_path).granted("hg-0123456789abcdef")
