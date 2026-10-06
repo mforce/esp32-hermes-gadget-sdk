@@ -53,6 +53,7 @@ struct UiModel {
   bool color_test = false;
   uint32_t frame = 0;    // animation frame, advanced by the app
   std::string hint;      // bottom bar
+  std::string profile;   // Ready screen: the Hermes profile chip (empty = none); hold it to switch
   std::string yes, no;   // answer buttons under the hero caption (Prompt screen)
   // Show the mascot as large as fits, with headline/detail as a caption,
   // instead of the header + text layout.
@@ -90,6 +91,8 @@ class Ui {
     const int left = ox_ + (info_.width - width) / 2;
     return x >= left && x < left + width && y >= oy_ && y < oy_ + layout_.top_h;
   }
+  // The profile chip: hit test in panel coordinates (false when the model shows none).
+  bool profile_hit(const UiModel& m, int x, int y) const;
 
  private:
   void draw_top(Canvas& c, const UiModel& m);
@@ -97,6 +100,13 @@ class Ui {
   void draw_content(Canvas& c, const UiModel& m);
   void draw_bottom(Canvas& c, const UiModel& m);
   void draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r);
+  struct Rect {
+    int x = 0, y = 0, w = 0, h = 0;
+  };
+  // The chip in area coordinates: in the top bar left of the link label on a rectangular
+  // panel, centred in the bottom bar on a round one. w == 0 when there is none.
+  Rect profile_rect(const UiModel& m) const;
+  void draw_profile(Canvas& c, const UiModel& m);
   struct HeroGeom {
     int size = 0, x = 0, y = 0;  // mascot
     int caption_y = 0, buttons_y = 0;
