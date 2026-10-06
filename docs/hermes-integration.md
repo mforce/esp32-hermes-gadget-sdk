@@ -186,10 +186,25 @@ Each would replace a workaround above with a small, generic hook that every plat
    - *Upstream status (October 2026):* an open pull request, [NousResearch/hermes-agent#65576](https://github.com/NousResearch/hermes-agent/pull/65576), adds `reasoning_effort` to `channel_overrides`, which is per chat (per device). A platform-wide default would be a small follow-up to it rather than a separate change.
    - *SDK change afterwards:* document a `platforms.gadget.reasoning_effort: low` default.
 
+6. **Approve a user directly.**
+   - *What:* a public `PairingStore.approve_user(platform, user_id, name)`.
+   - *Why:* the plugin approves a device in each profile it switches to, and today it has to mint a pairing code and redeem it (`plugin/adapter.py`, `_grant`).
+   - *SDK change afterwards:* `_grant` calls it.
+
 ## Running against a profile or a multiplexed gateway
 
-The adapter binds its own port, so give each profile that serves gadgets a different `platforms.gadget.extra.port`.
+Hermes runs every profile in one gateway process. Enable the gadget platform in the **default profile only**; that one adapter serves every profile, and devices choose which profile answers them ([protocol](protocol.md#profiles)).
 
-Device keys and pending pairing codes live in the plugin data directory. It is resolved with `plugin_data_dir("gadget")` when the adapter connects, so it follows whichever Hermes home the adapter is started under.
+- **Pair once.** A device authorized in the default profile (approved pairing code, `GADGET_ALLOWED_USERS`, or an allow-all setting) may use every profile the gateway serves. When it first switches to a profile, the plugin approves it in that profile's pairing store, so `hermes -p <profile> pairing list` shows it there.
+- **Revoke.** Remove the device's authorization in the default profile: `hermes pairing revoke gadget <id>`, and take it out of `GADGET_ALLOWED_USERS` or turn allow-all off if that is how it was let in. Within seconds it is moved back to the default profile, its pending questions are dropped, and it cannot switch again. Its approvals in other profiles stay on disk but are unusable while the default profile refuses it; remove them with `hermes -p <profile> pairing revoke gadget <id>` if you want them gone. `hermes gadget forget <id>` only resets the device's enrolled key so it can re-enroll; it is not a revocation.
+- **Switching.** A switch is refused (and can be retried) while the device has a turn running or a question pending. A reply that was already on its way from the old profile may still appear. Each profile keeps its own conversation, memory and personality, so switching does not carry the chat over.
+- Profiles with `gateway.standalone: true` or that are parked are not offered, and a device whose profile is parked or deleted is moved back to the default one.
+- Remove `gateway.profile_routes` entries for the gadget platform once devices choose their profile. A device that chooses always wins over a route; a route Hermes rejects makes Hermes refuse that device's messages.
 
-The agent tools look up the adapter for the session's profile (`HERMES_SESSION_PROFILE`). Multi-profile setups have only been exercised in unit tests so far.
+### Moving from one gadget adapter per profile
+
+Earlier versions told you to enable the gadget platform in each profile, on its own port.
+
+1. Disable `platforms.gadget` in every profile except the default one, and restart the gateway.
+2. Point every device at the default profile's address (the `server` setting).
+3. A device that was only enrolled or approved in another profile pairs once with the default profile. If it shows a key mismatch, run `hermes gadget forget <id>` in the default profile.

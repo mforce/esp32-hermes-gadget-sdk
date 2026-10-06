@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Switch which Hermes profile answers a gadget from its settings, or by holding the profile chip on a touchscreen. Pair once on the default profile; the plugin approves the device in each profile it switches to. Enable the gadget platform in the default profile only (see the migration note in `docs/hermes-integration.md`). Protocol: `hello.caps.profiles`, `welcome.profiles`, `profile.select` and `profile` (additive; `proto` stays 1).
+
 ## 0.2.0
 
 ### Hardware and setup
