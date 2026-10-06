@@ -106,12 +106,14 @@ class Ui {
   bool draw_qr(Canvas& c, const UiModel& m, int y0, int y1);
   void draw_bottom(Canvas& c, const UiModel& m);
   void draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r);
-  struct Rect {
+  struct Chip {
     int x = 0, y = 0, w = 0, h = 0;
+    int scale = 1;
+    std::string text;
   };
   // The chip in area coordinates: in the top bar left of the link label on a rectangular
   // panel, centred in the bottom bar on a round one. w == 0 when there is none.
-  Rect profile_rect(const UiModel& m) const;
+  Chip profile_chip(const UiModel& m) const;
   void draw_profile(Canvas& c, const UiModel& m);
   struct HeroGeom {
     int size = 0, x = 0, y = 0;  // mascot
