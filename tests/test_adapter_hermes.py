@@ -753,3 +753,97 @@ def test_one_closed_socket_does_not_stop_the_resets(hermes_home, gadget, make_si
     assert second.wait_for(lambda: second.status().get("profile") == "default", timeout=10)
     gadget.authorized.add(two.device_id)
     assert second.wait_screen("ready", timeout=10)  # the watcher still notices approvals
+
+
+DEVICE = "hg-cccccccccccccccc"
+
+
+@pytest.fixture
+def routing_rig(hermes_home):
+    """The real gateway resolvers around one gadget adapter (upstream's test_multiplex_transport_matrix.py rig)."""
+    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from gateway.pairing import PairingStore
+    from gateway.profile_routing import parse_profile_routes
+    from gateway.run import GatewayRunner
+    from hermes_gadget_plugin.adapter import GadgetAdapter
+
+    gadget = Platform("gadget")
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(multiplex_profiles=True)
+    runner.config.platforms = {gadget: PlatformConfig(enabled=True, extra={})}
+    # A static route a user may have configured before device selection existed.
+    runner.config.profile_routes = parse_profile_routes(
+        [{"name": "old-route", "platform": "gadget", "profile": "ops", "user_id": DEVICE}])
+    runner.pairing_store, runner.pairing_stores = PairingStore(profile="default"), {}
+    runner._primary_profile_name = "default"
+    adapter = GadgetAdapter(PlatformConfig(enabled=True, extra={"port": 0, "host": "127.0.0.1"}))
+    adapter.gateway_runner = runner
+    runner.adapters, runner._profile_adapters = {gadget: adapter}, {"ops": {}}
+    return runner, adapter, hermes_home
+
+
+def _session(profile, capable=True):
+    return types.SimpleNamespace(device_id=DEVICE, name="Kitchen", profile=profile,
+                                 caps={"profiles": True} if capable else {})
+
+
+def test_a_device_on_ops_runs_in_the_ops_home_and_replies_through_the_gadget_adapter(routing_rig):
+    from gateway.run import _profile_runtime_scope
+    from gateway.session_identity import resolve_identity
+    from hermes_constants import get_hermes_home
+
+    runner, adapter, home = routing_rig
+    source = adapter._source(_session("ops"))
+    identity = resolve_identity(source, runner=runner, adapter=adapter)
+    assert (identity.transport_profile, identity.runtime_profile) == ("default", "ops")
+    assert identity.runtime_home == home / "profiles" / "ops"
+    assert identity.authorization_home == home
+    assert runner._session_key_for_source(source).startswith("agent:ops:gadget:dm:")
+    assert runner._delivery_adapter_for(source) is adapter
+    with _profile_runtime_scope(identity.runtime_home):
+        assert get_hermes_home() == home / "profiles" / "ops"
+
+
+def test_a_capable_device_on_default_beats_a_static_route(routing_rig):
+    from gateway.session_identity import resolve_identity
+
+    runner, adapter, home = routing_rig
+    identity = resolve_identity(adapter._source(_session("default")), runner=runner, adapter=adapter)
+    assert identity.runtime_profile == "default" and identity.runtime_home == home
+    legacy = resolve_identity(adapter._source(_session("default", capable=False)), runner=runner, adapter=adapter)
+    assert legacy.runtime_profile == "ops"  # legacy devices keep today's routing
+
+
+def test_owner_check_ignores_routes_and_ops_only_approval(routing_rig):
+    # Real Hermes callbacks: the adapter's routed one trusts an ops-only approval through the static
+    # route; the default-bound owner check the plugin uses for every profile decision does not.
+    from gateway.config import Platform
+    from gateway.pairing import PairingStore
+    from gateway.run import _profile_runtime_scope
+
+    runner, adapter, home = routing_rig
+    ops = PairingStore(profile="ops")
+    runner.pairing_stores["ops"] = ops  # Hermes picks per-profile stores from this map
+    with _profile_runtime_scope(home / "profiles" / "ops"):  # as _grant does: never touch default's allowlist
+        ops.approve_code("gadget", ops.generate_code("gadget", DEVICE, "Kitchen"))
+    routed = runner._make_adapter_auth_check(Platform("gadget"))
+    owner = runner._make_adapter_auth_check(Platform("gadget"), profile_name="default")
+    assert routed(DEVICE, "dm", DEVICE) is True
+    assert owner(DEVICE, "dm", DEVICE) is False
+    adapter._owner_check = owner
+    assert adapter._owner_trusts(DEVICE) is False
+    # Approved in default: trusted by the owner check whatever the route says, so its first switch can happen.
+    default = runner.pairing_store
+    default.approve_code("gadget", default.generate_code("gadget", DEVICE, "Kitchen"))
+    assert owner(DEVICE, "dm", DEVICE) is True
+    capable = types.SimpleNamespace(device_id=DEVICE, caps={"profiles": True})
+    assert adapter._verdict(capable) is True
+
+
+def test_an_unknown_profile_falls_back_to_the_launch_home(routing_rig):
+    # Why the plugin refuses unknown profiles itself: Hermes only warns.
+    from gateway.session_identity import resolve_identity
+
+    runner, adapter, home = routing_rig
+    identity = resolve_identity(adapter._source(_session("nosuch")), runner=runner, adapter=adapter)
+    assert identity.runtime_home == home
