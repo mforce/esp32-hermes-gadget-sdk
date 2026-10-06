@@ -1336,3 +1336,103 @@ TEST("profiles: a stored profile Hermes no longer offers is dropped; the console
   r.app.console("factory-reset");
   CHECK(r.fake.kv.count("profile") == 0);  // fails without the explicit erase
 }
+
+namespace {
+// First panel point that lands on the profile chip, or {-1, -1}.
+std::pair<int, int> chip_point(Rig& r, int w, int h) {
+  for (int y = 0; y < h; y += 2)
+    for (int x = 0; x < w; x += 2)
+      if (r.app.profile_hit(x, y)) return {x, y};
+  return {-1, -1};
+}
+}  // namespace
+
+TEST("touch: holding the profile chip for a second switches profile; it never starts talking") {
+  Rig r(Rig::touch_profile());
+  r.bring_online_with_profiles();
+  CHECK_EQ(r.app.model().profile, std::string("Hermes"));
+  auto [x, y] = chip_point(r, 320, 240);
+  CHECK(x >= 0);
+  // The settings target keeps a usable part of the top bar beside the chip.
+  bool settings_left = false;
+  for (int sx = 0; sx < 320; sx += 2) settings_left |= r.app.settings_title_hit(sx, 4) && !r.app.profile_hit(sx, 4);
+  CHECK(settings_left);
+  hg::TouchGestures touch(r.app);
+  touch.update(true, x, y, r.fake.clock);
+  r.advance(500);
+  touch.tick(r.fake.clock);
+  CHECK(r.fake.last("profile.select") == nullptr);
+  CHECK(!r.fake.mic_on);
+  r.advance(600);
+  touch.tick(r.fake.clock);
+  CHECK(r.fake.last("profile.select") != nullptr);
+  touch.update(false, 0, 0, r.fake.clock);
+  CHECK(!r.fake.mic_on);
+  CHECK(r.fake.last("audio.start") == nullptr);
+}
+
+TEST("touch: the profile chip shows only on the Ready screen, and only with two or more profiles") {
+  Rig r(Rig::touch_profile());
+  r.bring_online(true);
+  CHECK(r.app.model().profile.empty());
+  CHECK_EQ(chip_point(r, 320, 240).first, -1);
+  Rig busy(Rig::touch_profile());
+  busy.bring_online_with_profiles();
+  auto [x, y] = chip_point(busy, 320, 240);
+  busy.server(R"({"type":"turn.start","turn":"t"})");  // Ready -> Thinking clears the chip
+  CHECK(busy.app.model().profile.empty());
+  CHECK_EQ(chip_point(busy, 320, 240).first, -1);
+  CHECK(!busy.app.profile_hit(x, y));  // where it was is the title bar again (the settings target)
+  busy.server(R"({"type":"turn.end","turn":"t"})");
+  busy.app.open_settings();
+  CHECK(busy.app.model().profile.empty());
+  busy.app.close_settings();
+  busy.advance(30000);  // past the reply's dwell, back on the hero Ready screen
+  CHECK_EQ(busy.app.model().profile, std::string("Hermes"));
+}
+
+TEST("touch: a long profile name is cut to fit and its whole chip stays on the panel") {
+  for (int round = 0; round < 2; ++round) {
+    Rig r(Rig::touch_profile());
+    const int size = round ? 466 : 320;
+    if (round) r.fake.make_round(466);
+    r.app.begin();
+    r.app.on_network(true, "wifi");
+    r.advance(1000);
+    r.app.on_transport_open();
+    r.server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":false})");
+    r.server(R"({"type":"welcome","session":"s1","heartbeat_s":20,"paired":true,"profile":"default",)"
+             R"("profiles":[{"id":"default","name":"ABCDEFGHIJKLMNOPQRSTUVWX"},{"id":"ops","name":"Ops"}]})");
+    int x0 = size, y0 = size, x1 = -1, y1 = -1;
+    for (int y = 0; y < (round ? size : 240); ++y)
+      for (int x = 0; x < size; ++x)
+        if (r.app.profile_hit(x, y)) {
+          x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+        }
+    CHECK(x1 >= 0);
+    CHECK(x1 - x0 + 1 <= size / 3 + 1);  // at most a third of the bar
+    if (round) {
+      const int c = size / 2;
+      for (auto [cx, cy] : {std::pair{x0, y0}, {x1, y0}, {x0, y1}, {x1, y1}})
+        CHECK((cx - c) * (cx - c) + (cy - c) * (cy - c) < c * c);  // every corner inside the circle
+    }
+  }
+}
+
+TEST("touch: the first touch on the profile chip of a sleeping display only wakes it") {
+  Rig r(Rig::touch_profile());
+  r.fake.backlight = true;
+  r.bring_online_with_profiles();
+  auto [x, y] = chip_point(r, 320, 240);
+  CHECK(x >= 0);
+  r.app.console("set screen_timeout 30");
+  r.advance(31000);  // asleep, and still inside the heartbeat window
+  CHECK(r.app.status_json().find("\"display_sleeping\":true") != std::string::npos);
+  hg::TouchGestures touch(r.app);
+  touch.update(true, x, y, r.fake.clock);
+  r.advance(1100);
+  touch.tick(r.fake.clock);
+  touch.update(false, 0, 0, r.fake.clock);
+  CHECK(r.fake.last("profile.select") == nullptr);
+  CHECK(r.app.status_json().find("\"display_sleeping\":false") != std::string::npos);
+}

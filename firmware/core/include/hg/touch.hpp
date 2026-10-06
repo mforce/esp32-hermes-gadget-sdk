@@ -2,6 +2,7 @@
 // screen is the main input:
 //
 //   hold the title     local settings after one second
+//   hold the profile chip   switch to the next Hermes profile after one second
 //   hold elsewhere     TALK, held for as long as the finger stays down
 //   quick tap          a TALK press and release (answers "yes" to a question)
 //   swipe down         a CANCEL press and release (discard, close, stop, "no")
@@ -38,7 +39,7 @@ class TouchGestures {
   void tick(uint32_t now_ms);
 
  private:
-  enum class State : uint8_t { Idle, Pending, Settings, Talk, Swipe, Ignored };
+  enum class State : uint8_t { Idle, Pending, Settings, Profile, Talk, Swipe, Ignored };
   void press(Button b);
   void release(Button b);
 

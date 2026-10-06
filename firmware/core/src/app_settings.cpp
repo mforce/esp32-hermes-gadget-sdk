@@ -9,6 +9,10 @@ bool App::settings_title_hit(int x, int y) const {
   return ui_ && !prompt_showing() && !ota_busy() && !wifi_setup_open() && ui_->title_hit(x, y);
 }
 
+bool App::profile_hit(int x, int y) const {
+  return ui_ && !display_sleeping_ && ui_->profile_hit(model_, x, y);
+}
+
 bool App::open_settings() {
   if (prompt_showing() || ota_busy() || ota_ == Ota::Restarting || !wifi_setup_text_.empty()) return false;
   wake_display();

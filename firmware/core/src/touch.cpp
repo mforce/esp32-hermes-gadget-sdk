@@ -8,9 +8,11 @@ void TouchGestures::press(Button b) { app_.on_button(b, true); }
 void TouchGestures::release(Button b) { app_.on_button(b, false); }
 
 void TouchGestures::tick(uint32_t now_ms) {
-  if (state_ == State::Settings && now_ms - t0_ >= 1000) {
+  if ((state_ == State::Settings || state_ == State::Profile) && now_ms - t0_ >= 1000) {
+    const bool profile = state_ == State::Profile;
     state_ = State::Ignored;
-    app_.open_settings();
+    if (profile) app_.next_agent_profile();
+    else app_.open_settings();
   }
   if (state_ == State::Pending && static_cast<int32_t>(now_ms - t0_) >= static_cast<int32_t>(cfg_.hold_ms)) {
     state_ = State::Talk;
@@ -35,7 +37,7 @@ void TouchGestures::update(bool touching, int x, int y, uint32_t now_ms) {
 
   if (state_ == State::Idle) {
     if (app_.wake_display()) { state_ = State::Ignored; return; }
-    state_ = app_.settings_title_hit(x, y) ? State::Settings : State::Pending;
+    state_ = app_.profile_hit(x, y) ? State::Profile : app_.settings_title_hit(x, y) ? State::Settings : State::Pending;
     x0_ = x;
     y0_ = y;
     t0_ = now_ms;
@@ -55,6 +57,10 @@ void TouchGestures::update(bool touching, int x, int y, uint32_t now_ms) {
       } else {
         tick(now_ms);
       }
+      break;
+    case State::Profile:
+      if (std::abs(dx) > cfg_.slop_px || std::abs(dy) > cfg_.slop_px) state_ = State::Ignored;
+      else tick(now_ms);
       break;
     case State::Pending:
       if (swiped_down) {

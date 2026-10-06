@@ -1402,6 +1402,7 @@ void App::update_model() {
   m.level = level_;
   m.speaking = speaking();
   m.color_test = false;
+  m.profile.clear();
 
   switch (phase_) {
     case Phase::NoNetwork:
@@ -1551,6 +1552,7 @@ void App::update_model() {
                                    : (talk_mode_ == TalkMode::Tap ? "tap " : "hold ") + talk + " to talk";
     bool showing_reply = !reply_.empty() && static_cast<int32_t>(reply_until_ - now()) > 0;
     m.hero = !showing_reply;
+    if (agent_profiles_.size() > 1 && paired_) m.profile = agent_profile_name();
     if (m.hero) {
       m.headline = "Hi, I'm Hermes";
       m.detail = reply_.empty() || !profile_.has_scroll_buttons ? "Ask me anything" : "UP shows my last reply";
