@@ -75,6 +75,8 @@ def gadget(loop_thread, tmp_path, monkeypatch):
 
     adapter.set_authorization_check(
         lambda user_id, chat_type=None, chat_id=None, **kw: user_id in state.authorized)
+    # The default profile's verdict, which profile switching trusts (no runner here to build it).
+    adapter._owner_check = lambda user_id, chat_type=None, chat_id=None, **kw: user_id in state.authorized
 
     async def handler(event):
         # Stands in for the gateway runner: unauthorized senders get a pairing code.
@@ -499,3 +501,235 @@ def test_staged_firmware_the_device_refuses_is_dropped(gadget, make_sim, monkeyp
     status = queue.status(device_id)
     assert status["code"] == "wrong_board" and "built for esp32s3-breadboard" in status["error"]
     assert queue.pending() == [] and sim.update_image is None
+
+
+@pytest.fixture
+def hermes_home(tmp_path, monkeypatch):
+    """A Hermes home serving 'default' and 'ops', with a parked 'old' profile that must not be offered."""
+    home = tmp_path / "home"
+    for name in ("ops", "old"):
+        (home / "profiles" / name).mkdir(parents=True)
+        (home / "profiles" / name / "config.yaml").write_text("{}\n")  # identity marker
+    (home / "profiles" / "old" / "gateway.parked").touch()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def _select_next_profile(sim):
+    sim.console("settings")
+    for _ in range(3):
+        sim.console("cancel")
+    sim.console("talk")
+    sim.console("release")
+    sim.console("settings close")
+
+
+def _profile_msgs(sim):
+    return [m for m in sim.received if m["type"] == "profile"]
+
+
+def test_the_roster_lists_the_profiles_this_gateway_serves(hermes_home, gadget):
+    ids = [p["id"] for p in gadget.adapter.profiles()]
+    assert ids == ["default", "ops"]  # parked 'old' is not served
+
+
+def test_a_paired_device_switches_profile_and_its_turns_run_there(hermes_home, gadget, make_sim):
+    from gateway.pairing import PairingStore
+
+    sim = _paired_sim(gadget, make_sim)
+    device = sim.status()["device_id"]
+    assert [p["id"] for p in sim.last_received("welcome")["profiles"]] == ["default", "ops"]
+    _select_next_profile(sim)
+    assert sim.wait_for(lambda: {"type": "profile", "profile": "ops"} in _profile_msgs(sim), timeout=5)
+    assert PairingStore(profile="ops").is_approved("gadget", device)  # pair once, use every profile
+    gadget.events.clear()
+    sim.type_text("hi")
+    assert sim.wait_for(lambda: gadget.events, timeout=5)
+    assert gadget.events[-1].source.profile == "ops"
+
+
+def test_a_capable_device_on_default_says_so_explicitly(hermes_home, gadget, make_sim):
+    # An explicit "default" stops a static gateway.profile_routes entry from overriding the device.
+    sim = _paired_sim(gadget, make_sim)
+    gadget.events.clear()
+    sim.type_text("hi")
+    assert sim.wait_for(lambda: gadget.events, timeout=5)
+    assert gadget.events[-1].source.profile == "default"
+
+
+def test_old_firmware_gets_no_roster_and_an_untouched_source(hermes_home, gadget, loop_thread):
+    """A raw protocol-1 device that never sends caps.profiles, against the profile-capable adapter."""
+    import asyncio
+    import base64
+    import os
+
+    import websockets
+    from hermes_gadget_plugin import protocol
+
+    key = os.urandom(32)
+    device = protocol.device_id_for_key(key)
+    gadget.authorized.add(device)
+
+    async def legacy():
+        async with websockets.connect(gadget.url, subprotocols=["hermes-gadget.v1"]) as ws:
+            await ws.send(json.dumps({"type": "hello", "proto": 1, "device_id": device, "name": "Old",
+                                      "board": "old", "firmware": "0.1.0", "caps": {}}))
+            json.loads(await ws.recv())  # challenge
+            await ws.send(json.dumps({"type": "auth", "key": base64.b64encode(key).decode()}))
+            welcome = json.loads(await ws.recv())
+            await ws.send(json.dumps({"type": "text", "id": "m1", "text": "hi"}))
+            while True:  # keep the socket until the turn is processed
+                msg = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                if msg.get("type") == "reply" and msg.get("text") == "echo: hi":
+                    return welcome
+
+    welcome = loop_thread.run(legacy())
+    assert "profile" not in welcome and "profiles" not in welcome
+    event = next(e for e in reversed(gadget.events) if e.text == "hi")
+    assert event.source.profile is None  # legacy routing, routes included
+
+
+def test_switching_is_refused_when_unknown_unpaired_or_busy(hermes_home, gadget, make_sim):
+    import time as _time
+
+    from hermes_gadget_plugin.adapter import _Prompt
+
+    run, adapter = gadget.run, gadget.adapter
+    sim = make_sim(gadget.url)
+    assert sim.wait_screen("pairing", timeout=10)
+    session = adapter.hub.get(sim.status()["device_id"])
+    assert run(adapter.select_profile(session, "ops")) == "unpaired"
+    gadget.authorized.add(session.device_id)
+    assert sim.wait_screen("ready", timeout=10)
+    assert run(adapter.select_profile(session, "nosuch")) == "unknown"
+    assert run(adapter.select_profile(session, "old")) == "unknown"  # parked
+    adapter._turns[session.device_id] = "t1"
+    assert run(adapter.select_profile(session, "ops")) == "busy"
+    adapter._turns.pop(session.device_id)
+    # A question pending -> busy; once it has expired, switching works again.
+    stale = _Prompt(id="q1", kind="slash", session_key="k", title="t", text="x")
+    adapter._prompts[session.device_id] = [stale]
+    assert run(adapter.select_profile(session, "ops")) == "busy"
+    stale.created = _time.monotonic() - 10_000
+    assert run(adapter.select_profile(session, "ops")) is None
+    assert session.profile == "ops"
+
+
+def test_a_stored_profile_that_is_gone_falls_back_to_default(hermes_home, gadget, make_sim):
+    sim = _paired_sim(gadget, make_sim)
+    _select_next_profile(sim)
+    assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+    first = sim.last_received("welcome")["session"]
+    (hermes_home / "profiles" / "ops" / "gateway.parked").touch()  # parked while connected
+    assert sim.wait_for(lambda: _profile_msgs(sim)[-1] == {"type": "profile", "profile": "default"}, timeout=10)
+    sim.console("reconnect")
+    assert sim.wait_for(lambda: sim.last_received("welcome")["session"] != first, timeout=10)
+    assert sim.last_received("welcome")["profile"] == "default"
+    assert sim.status().get("profile") == "default"
+
+
+def test_grants_are_scoped_serialized_and_refusable(hermes_home, gadget, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gateway.pairing import PairingStore
+    from hermes_gadget_plugin.adapter import GadgetAdapter
+
+    (hermes_home / ".env").write_text("GADGET_ALLOWED_USERS=hg-0000000000000000\n")
+    (hermes_home / "profiles" / "ops" / ".env").write_text("GADGET_ALLOWED_USERS=hg-1111111111111111\n")
+    devices = [f"hg-{i:016x}" for i in range(2, 6)]
+    with ThreadPoolExecutor(4) as pool:
+        assert all(pool.map(lambda d: GadgetAdapter._grant(d, d, "ops"), devices))
+    store = PairingStore(profile="ops")
+    assert all(store.is_approved("gadget", d) for d in devices)  # no grant lost to a concurrent rewrite
+    assert "hg-0000000000000000" in (hermes_home / ".env").read_text()
+    assert not any(d in (hermes_home / ".env").read_text() for d in devices)  # default's allowlist untouched
+    monkeypatch.setattr(PairingStore, "generate_code", lambda self, *a, **kw: None)  # rate limited / locked out
+    assert GadgetAdapter._grant("hg-ffffffffffffffff", "x", "ops") is False
+
+
+def test_revocation_resets_profile_and_questions_even_mid_grant(hermes_home, gadget, make_sim, monkeypatch):
+    from hermes_gadget_plugin.adapter import GadgetAdapter, _Prompt
+
+    run, adapter = gadget.run, gadget.adapter
+    sim = _paired_sim(gadget, make_sim)
+    session = adapter.hub.get(sim.status()["device_id"])
+
+    def revoke_during_grant(device_id, name, profile):
+        gadget.authorized.discard(device_id)  # the owner revokes while the grant runs
+        return True
+
+    with monkeypatch.context() as grant_patch:  # never monkeypatch.undo(): it would drop the fixtures' patches too
+        grant_patch.setattr(GadgetAdapter, "_grant", staticmethod(revoke_during_grant))
+        assert run(adapter.select_profile(session, "ops")) == "unpaired"
+    assert session.profile == "default"
+    gadget.authorized.add(session.device_id)
+    assert sim.wait_screen("ready", timeout=10)
+    _select_next_profile(sim)
+    assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+    adapter._prompts[session.device_id] = [_Prompt(id="q1", kind="approval", session_key="k", title="t", text="x")]
+    gadget.authorized.discard(session.device_id)
+    assert sim.wait_for(lambda: sim.status().get("profile") == "default", timeout=10)
+    assert not adapter._prompts.get(session.device_id)
+    resolved = []
+    monkeypatch.setattr("tools.approval.resolve_gateway_approval", lambda *a, **kw: resolved.append(a))
+    run(adapter.on_prompt_reply(session, "q1", True))  # ignored: the device is not approved
+    assert resolved == []
+
+
+def test_switching_trusts_only_a_definite_yes_from_the_default_profile(hermes_home, gadget, make_sim):
+    from gateway.pairing import PairingStore
+
+    run, adapter = gadget.run, gadget.adapter
+    sim = _paired_sim(gadget, make_sim)
+    session = adapter.hub.get(sim.status()["device_id"])
+
+    def boom(*a, **kw):
+        raise RuntimeError("auth backend down")
+
+    for verdict in (lambda *a, **kw: None, boom, lambda *a, **kw: "yes"):  # unknown, raising, non-boolean
+        adapter._owner_check = verdict
+        assert run(adapter.select_profile(session, "ops")) == "unpaired"
+    assert not PairingStore(profile="ops").is_approved("gadget", session.device_id)  # nothing minted
+    # Approved only in ops (for example through an old static route) does not count as trusted.
+    ops = PairingStore(profile="ops")
+    ops.approve_code("gadget", ops.generate_code("gadget", session.device_id, "Kitchen"))
+    adapter._owner_check = lambda user_id, *a, **kw: PairingStore(profile="default").is_approved("gadget", user_id)
+    assert run(adapter.select_profile(session, "ops")) == "unpaired"
+
+
+def test_a_turn_marker_does_not_survive_revocation(hermes_home, gadget, make_sim):
+    run, adapter = gadget.run, gadget.adapter
+    sim = _paired_sim(gadget, make_sim)
+    session = adapter.hub.get(sim.status()["device_id"])
+    _select_next_profile(sim)
+    assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+    adapter._turns[session.device_id] = "t1"
+    gadget.authorized.discard(session.device_id)
+    assert sim.wait_for(lambda: sim.status().get("profile") == "default", timeout=10)
+    gadget.authorized.add(session.device_id)
+    assert sim.wait_screen("ready", timeout=10)
+    assert run(adapter.select_profile(session, "ops")) is None  # not stuck on "busy"
+
+
+def test_one_closed_socket_does_not_stop_the_resets(hermes_home, gadget, make_sim, monkeypatch):
+    from websockets.exceptions import ConnectionClosedOK
+
+    adapter = gadget.adapter
+    first = _paired_sim(gadget, make_sim, state="first")
+    second = _paired_sim(gadget, make_sim, name="Second", state="second")
+    for sim in (first, second):
+        _select_next_profile(sim)
+        assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+    one, two = (adapter.hub.get(sim.status()["device_id"]) for sim in (first, second))
+    if sorted(adapter.hub.sessions) != [one.device_id, two.device_id]:  # make the broken one come first
+        one, two, first, second = two, one, second, first
+
+    async def closed(_obj):
+        raise ConnectionClosedOK(None, None)
+
+    monkeypatch.setattr(one, "send_json", closed)
+    gadget.authorized.discard(one.device_id)
+    gadget.authorized.discard(two.device_id)
+    assert second.wait_for(lambda: second.status().get("profile") == "default", timeout=10)
+    gadget.authorized.add(two.device_id)
+    assert second.wait_screen("ready", timeout=10)  # the watcher still notices approvals
