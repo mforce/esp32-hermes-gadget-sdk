@@ -41,6 +41,16 @@ void App::close_settings() {
   update_model();
 }
 
+bool App::menu_visible(Menu item) const {
+  switch (item) {
+    case Menu::Profile: return agent_profiles_.size() > 1;
+    case Menu::Power: return hal_.power != nullptr;
+    case Menu::PowerOff: return hal_.power && hal_.power->can_power_off();
+    case Menu::WifiSetup: return static_cast<bool>(on_wifi_setup);
+    default: return true;
+  }
+}
+
 void App::settings_input(Button button, bool pressed) {
   if (hardware_check_ == HardwareCheck::Inputs) {
     if (pressed) {
@@ -55,18 +65,13 @@ void App::settings_input(Button button, bool pressed) {
     stop_hardware_check();
     check_result_.clear();
     power_off_armed_ = false;
-    int item = static_cast<int>(menu_) + (button == Button::Up ? -1 : 1);
-    if (item < static_cast<int>(Menu::Volume)) item = static_cast<int>(Menu::Back);
-    if (item > static_cast<int>(Menu::Back)) item = static_cast<int>(Menu::Volume);
+    int item = static_cast<int>(menu_);
+    do {
+      item += button == Button::Up ? -1 : 1;
+      if (item < static_cast<int>(Menu::Volume)) item = static_cast<int>(Menu::Back);
+      if (item > static_cast<int>(Menu::Back)) item = static_cast<int>(Menu::Volume);
+    } while (!menu_visible(static_cast<Menu>(item)));
     menu_ = static_cast<Menu>(item);
-    const bool can_power_off = hal_.power && hal_.power->can_power_off();
-    if ((!hal_.power && menu_ == Menu::Power) ||
-        (!can_power_off && menu_ == Menu::PowerOff)) {
-      menu_ = menu_ == Menu::Power ? (button == Button::Up ? Menu::Info : Menu::IdleTimer)
-                                   : (button == Button::Up ? Menu::IdleTimer : Menu::WifiSetup);
-    }
-    if (!on_wifi_setup && menu_ == Menu::WifiSetup)
-      menu_ = button == Button::Up ? (can_power_off ? Menu::PowerOff : Menu::IdleTimer) : Menu::Back;
     return;
   }
   if (button != Button::Talk || pressed) return;
@@ -88,6 +93,9 @@ void App::settings_input(Button button, bool pressed) {
       break;
     case Menu::TalkMode:
       if (hal_.mic) console(talk_mode_ == TalkMode::Hold ? "set talk_mode tap" : "set talk_mode hold");
+      break;
+    case Menu::Profile:
+      if (!next_agent_profile()) check_result_ = "Can't switch now";
       break;
     case Menu::Microphone:
       if (hal_.mic && hal_.mic->start(profile_.mic_rate)) hardware_check_ = HardwareCheck::Microphone;
@@ -173,6 +181,10 @@ void App::settings_model() {
       m.detail = "Talk mode";
       m.body = !hal_.mic ? "No microphone driver is active." : talk_mode_ == TalkMode::Hold ? "Hold to record; release to send."
                                                                                          : "Tap to record; pause or tap to send.";
+      break;
+    case Menu::Profile:
+      m.detail = "Hermes profile";
+      m.body = agent_profile_name() + "\nSelect to switch to the next profile.";
       break;
     case Menu::Microphone:
       m.detail = "Microphone check";
