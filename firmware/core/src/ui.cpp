@@ -287,20 +287,23 @@ void Ui::draw_top(Canvas& c, const UiModel& m) {
   c.text(label_x, ty, label, s, kDim);
   int r = std::max(2, 3 * s / 2 + 1);
   c.fill_circle(label_x - 3 * s - r, layout_.top_h / 2, r, dot);
-  const Rect chip = profile_rect(m);
+  const Chip chip = profile_chip(m);
   const int title_end = chip.w ? chip.x - 3 * s : label_x - 6 * s - 2 * r;
   int title_cols = cols_for(title_end - 3 * s, s);
   c.text(3 * s, ty, fit(m.title, title_cols), s, kText);
   draw_profile(c, m);
 }
 
-Ui::Rect Ui::profile_rect(const UiModel& m) const {
-  Rect rect;
+Ui::Chip Ui::profile_chip(const UiModel& m) const {
+  Chip rect;
   if (m.profile.empty()) return rect;
   const int s = layout_.scale;
-  const int max_w = info_.width / 3;
-  const std::string name = fit(m.profile, cols_for(max_w - 6 * s, s));
-  rect.w = std::min(max_w, std::max(24 * s, Canvas::text_width(name, s) + 6 * s));
+  // A third of the bar; a round panel's bottom bar is wider than its inscribed square.
+  const int max_w = (panel_.round ? panel_.width : info_.width) / 3;
+  // A name that does not fit is drawn one size smaller before it is cut.
+  rect.scale = Canvas::text_width(m.profile, s) + 6 * s <= max_w ? s : std::max(1, s - 1);
+  rect.text = fit(m.profile, cols_for(max_w - 6 * rect.scale, rect.scale));
+  rect.w = std::min(max_w, std::max(24 * s, Canvas::text_width(rect.text, rect.scale) + 6 * rect.scale));
   if (panel_.round) {
     rect.h = layout_.bottom_h;
     rect.x = (info_.width - rect.w) / 2;
@@ -316,17 +319,16 @@ Ui::Rect Ui::profile_rect(const UiModel& m) const {
 }
 
 bool Ui::profile_hit(const UiModel& m, int x, int y) const {
-  const Rect r = profile_rect(m);
+  const Chip r = profile_chip(m);
   return r.w > 0 && x >= ox_ + r.x && x < ox_ + r.x + r.w && y >= oy_ + r.y && y < oy_ + r.y + r.h;
 }
 
 void Ui::draw_profile(Canvas& c, const UiModel& m) {
-  const Rect r = profile_rect(m);
+  const Chip r = profile_chip(m);
   if (!r.w) return;
-  const int s = layout_.scale;
-  const std::string name = fit(m.profile, cols_for(r.w - 6 * s, s));
-  c.fill_rect(r.x, r.y, r.w, r.h, kBg);
-  c.text(r.x + (r.w - Canvas::text_width(name, s)) / 2, r.y + (r.h - font::kGlyphHeight * s) / 2, name, s, kText);
+  c.fill_rect(r.x, r.y, r.w, r.h, panel_.round ? kBar : kBg);  // stands out from its bar, like the settings target
+  c.text(r.x + (r.w - Canvas::text_width(r.text, r.scale)) / 2, r.y + (r.h - font::kGlyphHeight * r.scale) / 2, r.text,
+         r.scale, kText);
 }
 
 void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
