@@ -270,7 +270,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
     def _owner_bound(self, session: DeviceSession) -> bool:
         """Devices held to the default profile's verdict: those that can switch, and any this plugin
         approved in another profile, whatever they claim in a later hello."""
-        return session.caps.get("profiles") is True or self._store.granted(session.device_id)
+        return session.caps.get("profiles") is True or self._store.owner_bound(session.device_id)
 
     def _verdict(self, session: DeviceSession) -> Optional[bool]:
         """Owner-bound devices answer to the default profile alone; others keep the routed check."""
@@ -290,9 +290,14 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         if self._busy(session.device_id):
             return "busy"
         if profile != "default":
+            try:  # before the grant exists, so no approval this plugin makes is ever unbound
+                await asyncio.to_thread(self._store.bind_to_owner, session.device_id)
+            except OSError:
+                logger.warning("[%s] cannot bind %s to the default profile", self.name, session.device_id,
+                               exc_info=True)
+                return "unpaired"
             if not await asyncio.to_thread(self._grant, session.device_id, session.name, profile):
                 return "unpaired"
-            self._store.record_grant(session.device_id, profile)
         if not self._still_trusted(session):  # revoked or replaced while the grant ran
             return "unpaired"
         session.profile = profile
@@ -495,6 +500,10 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
                 and not self._still_trusted(session)):
             logger.info("[%s] dropped a message from %s for profile %s: not trusted by the default profile",
                         self.name, session.device_id, event.source.profile)
+            if self._hub is not None and self._hub.get(session.device_id) is session:
+                # The device is waiting for an answer; an old connection's leftovers get none.
+                await session.turn_end("", "failure")
+                await session.send_notice("Not allowed: this gadget is not approved for that profile")
             return
         await self.handle_message(event)
 
