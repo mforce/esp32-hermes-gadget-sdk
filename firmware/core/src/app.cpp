@@ -426,8 +426,7 @@ void App::h_profile(const json::Value& m) {
   profile_notice(error.empty() ? "Now talking to " + agent_profile_name() : "Profile not changed (" + error + ")");
 }
 
-// Visible on Ready (the notice line) and in the open settings item; the hint bar is not,
-// because settings returns before the hint flash is applied and the round chip replaces the hint.
+// The notice line and the open settings item; not the hint bar, which settings and the round chip hide.
 void App::profile_notice(std::string text) {
   if (menu_ == Menu::Profile) check_result_ = text;
   notice_ = std::move(text);
