@@ -989,3 +989,88 @@ def test_a_prompt_reply_needs_live_trust_and_the_current_connection(hermes_home,
     ask("q3")
     run(adapter.on_prompt_reply(current, "q3", True))
     assert len(resolved) == 1
+
+
+def test_a_device_is_bound_to_the_default_profile_before_any_grant_is_visible(live_rig, monkeypatch):
+    import asyncio
+    import threading
+
+    from hermes_gadget_plugin.adapter import GadgetAdapter
+
+    rig = live_rig
+    rig.approve_default()
+    granted, release = threading.Event(), threading.Event()
+    grant = GadgetAdapter._grant
+
+    def paused_grant(*args):
+        result = grant(*args)  # the ops approval is on disk from here
+        granted.set()
+        release.wait(10)
+        return result
+
+    monkeypatch.setattr(GadgetAdapter, "_grant", staticmethod(paused_grant))
+    with rig.connect({"profiles": True}):
+        session = rig.adapter.hub.get(rig.device)
+
+        async def start():
+            return asyncio.ensure_future(rig.adapter.select_profile(session, "ops"))
+
+        switch = rig.run(start())
+        assert granted.wait(10)
+        rig.runner.pairing_store.revoke("gadget", rig.device)
+        with rig.connect({}) as legacy:  # older firmware, same key, the old ops route still configured
+            assert legacy.welcome["paired"] is False
+            rig.run(rig.adapter.on_text(rig.adapter.hub.get(rig.device), "m1", "grant-gap"))
+            assert _admitted(rig) == []
+            release.set()
+            assert rig.run(asyncio.wait_for(switch, 10)) == "unpaired"
+
+
+def test_a_switch_that_cannot_bind_the_device_mints_nothing(live_rig, monkeypatch):
+    from gateway.pairing import PairingStore
+
+    rig = live_rig
+    rig.approve_default()
+
+    def fail(device_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.adapter._store, "bind_to_owner", fail)
+    with rig.connect({"profiles": True}):
+        session = rig.adapter.hub.get(rig.device)
+        assert rig.run(rig.adapter.select_profile(session, "ops")) == "unpaired"
+        assert session.profile == "default"
+    assert not PairingStore(profile="ops").is_approved("gadget", rig.device)
+
+
+def test_forget_from_a_stale_store_keeps_the_device_bound(live_rig):
+    from hermes_gadget_plugin.store import DeviceStore
+
+    rig = live_rig
+    rig.approve_default()
+    directory = rig.adapter._store.path.parent
+    with rig.connect({"profiles": True}):
+        session = rig.adapter.hub.get(rig.device)
+        cli = DeviceStore(directory)  # 'hermes gadget forget' in another process, loaded before the switch
+        assert rig.run(rig.adapter.select_profile(session, "ops")) is None
+    assert cli.forget(rig.device)  # rewrites devices.json from its older snapshot
+    rig.adapter._store = DeviceStore(directory)  # as after a gateway restart
+    rig.runner.pairing_store.revoke("gadget", rig.device)
+    with rig.connect({}) as legacy:  # re-enrolls the same key, no profile flag, old ops route
+        assert legacy.welcome["paired"] is False
+        rig.run(rig.adapter.on_text(rig.adapter.hub.get(rig.device), "m1", "after-forget"))
+        assert _admitted(rig) == []
+
+
+def test_a_refused_message_does_not_leave_the_device_thinking(hermes_home, gadget, make_sim):
+    run, adapter = gadget.run, gadget.adapter
+    sim = _paired_sim(gadget, make_sim)
+    session = adapter.hub.get(sim.status()["device_id"])
+    assert run(adapter.select_profile(session, "ops")) is None
+    adapter._watch_task.cancel()  # no poll: only the refusal itself can end the wait
+    adapter._owner_check = lambda *a, **kw: False
+    gadget.events.clear()
+    sim.type_text("hi")
+    assert sim.wait_for(lambda: sim.status()["screen"] == "ready", timeout=3)
+    assert gadget.events == []
+    assert "not approved" in (sim.last_received("notice") or {}).get("text", "")
