@@ -79,6 +79,7 @@ const App::Route App::kRoutes[] = {
     {"prompt.close", &App::h_prompt_close}, {"ota.offer", &App::h_ota_offer},
     {"ota.begin", &App::h_ota_begin},     {"ota.end", &App::h_ota_end},
     {"ota.abort", &App::h_ota_abort},
+    {"profile", &App::h_profile},
 };
 
 App::App(Hal& hal, DeviceProfile profile) : hal_(hal), profile_(std::move(profile)) {}
@@ -99,6 +100,7 @@ void App::load_settings() {
   server_url_ = setting("server", profile_.default_server_url);
   access_token_ = setting("token", profile_.default_access_token);
   talk_mode_ = setting("talk_mode", "hold") == "tap" ? TalkMode::Tap : TalkMode::Hold;
+  agent_profile_ = setting("profile", "default");
   int vol = std::atoi(setting("volume", "70").c_str());
   volume_ = static_cast<uint8_t>(std::max(0, std::min(100, vol)));
   if (hal_.speaker) hal_.speaker->set_volume(volume_);
@@ -324,6 +326,7 @@ void App::send_hello() {
   if (profile_.has_scroll_buttons) inputs.push("up").push("down");
   caps.set("inputs", inputs);
   caps.set("talk_mode", talk_mode_ == TalkMode::Tap ? "tap" : "hold");
+  caps.set("profiles", true);
   if (hal_.updater) {
     json::Value ota = json::Value::object();
     ota.set("max_size", hal_.updater->capacity());
@@ -348,6 +351,7 @@ void App::send_hello() {
       .set("caps", caps)
       .set("actions", acts)
       .set("sensors", sensors);
+  if (agent_profile_ != "default") hello.set("profile", agent_profile_);
   if (!access_token_.empty()) hello.set("token", access_token_);
   send(hello);
   sensors_dirty_ = false;
@@ -399,11 +403,62 @@ void App::h_welcome(const json::Value& m) {
     pairing_command_.clear();
   }
   log(LogLevel::Info, paired_ ? "online (paired)" : "online (waiting for pairing approval)");
+  agent_profiles_.clear();
+  for (const auto& p : m["profiles"].elements()) {
+    if (agent_profiles_.size() >= 8) break;
+    const std::string& id = p["id"].as_string();
+    if (id.empty()) continue;
+    const std::string& name = p["name"].as_string();
+    agent_profiles_.push_back({id, (name.empty() ? id : name).substr(0, 24)});
+  }
+  if (m["profile"].is_string()) set_agent_profile(m["profile"].as_string());
   // A freshly installed firmware has reached Hermes, so it can take the next update: keep it.
   if (hal_.updater && hal_.updater->pending_verify()) {
     hal_.updater->confirm();
     log(LogLevel::Info, "new firmware " + profile_.firmware + " reached Hermes; keeping it");
   }
+}
+
+void App::h_profile(const json::Value& m) {
+  if (m["profile"].is_string()) set_agent_profile(m["profile"].as_string());
+  const std::string& error = m["error"].as_string();
+  profile_notice(error.empty() ? "Now talking to " + agent_profile_name() : "Profile not changed (" + error + ")");
+}
+
+// Visible on Ready (the notice line) and in the open settings item; the hint bar is not,
+// because settings returns before the hint flash is applied and the round chip replaces the hint.
+void App::profile_notice(std::string text) {
+  if (menu_ == Menu::Profile) check_result_ = text;
+  notice_ = std::move(text);
+  notice_until_ = now() + 4000;
+}
+
+void App::set_agent_profile(const std::string& id) {
+  if (id.empty()) return;
+  agent_profile_ = id;
+  if (!hal_.storage || setting("profile", "default") == id) return;
+  if (id == "default") hal_.storage->erase("profile");
+  else hal_.storage->set("profile", id);
+}
+
+std::string App::agent_profile_name() const {
+  for (const auto& p : agent_profiles_)
+    if (p.id == agent_profile_) return p.name;
+  return agent_profile_;
+}
+
+bool App::next_agent_profile() {
+  if (phase_ != Phase::Online || !paired_ || agent_profiles_.size() < 2 || mode_ != Mode::Idle ||
+      prompt_showing() || ota_busy())
+    return false;
+  size_t i = 0;
+  while (i < agent_profiles_.size() && agent_profiles_[i].id != agent_profile_) ++i;
+  const AgentProfile& next = agent_profiles_[i < agent_profiles_.size() ? (i + 1) % agent_profiles_.size() : 0];
+  json::Value msg = proto::message("profile.select");
+  msg.set("profile", next.id);
+  send(msg);
+  profile_notice("Switching to " + next.name);
+  return true;
 }
 
 void App::h_pairing(const json::Value& m) {
@@ -1532,6 +1587,7 @@ json::Value App::status_value() const {
       .set("phase", phase)
       .set("screen", screen_name(model_.screen))
       .set("paired", paired_)
+      .set("profile", agent_profile_)
       .set("server", server_url_)
       .set("network", network_up_);
   s.set("display_sleeping", display_sleeping_);
@@ -1680,6 +1736,7 @@ std::string App::console(std::string_view raw) {
     hal_.storage->erase("device_key");
     if (cmd == "factory-reset") {
       for (const char* k : kSettingKeys) hal_.storage->erase(k);
+      hal_.storage->erase("profile");
       for (const auto& k : profile_.extra_settings) hal_.storage->erase(k);
     }
     return "@ok " + cmd + " (restart the device to apply)";
