@@ -96,10 +96,13 @@ def test_pairing_codes_expire(tmp_path):
     assert store.pairing_for("hg-0123456789abcdef") is None
 
 
-def test_profile_grants_persist_and_survive_forget(tmp_path):
-    store = DeviceStore(tmp_path)
-    store.enroll("hg-0123456789abcdef", b"k" * 32)
-    assert not store.granted("hg-0123456789abcdef")
-    store.record_grant("hg-0123456789abcdef", "ops")
-    store.forget("hg-0123456789abcdef")  # resets the key; it is not a revocation
-    assert DeviceStore(tmp_path).granted("hg-0123456789abcdef")
+def test_owner_binding_survives_forget_from_a_stale_store(tmp_path):
+    device = "hg-0123456789abcdef"
+    gateway = DeviceStore(tmp_path)
+    gateway.enroll(device, b"k" * 32)
+    cli = DeviceStore(tmp_path)  # another process, holding a snapshot taken before the binding
+    assert not gateway.owner_bound(device)
+    gateway.bind_to_owner(device)
+    gateway.bind_to_owner(device)  # idempotent
+    assert cli.forget(device)  # rewrites devices.json from its snapshot; it is not a revocation
+    assert DeviceStore(tmp_path).owner_bound(device)
