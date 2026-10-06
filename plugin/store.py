@@ -24,7 +24,7 @@ class DeviceStore:
         self._dir = Path(directory)
         self._path = self._dir / self.FILENAME
         self._lock = threading.Lock()
-        self._data: dict[str, Any] = {"devices": {}, "pairing": {}}
+        self._data: dict[str, Any] = {"devices": {}, "pairing": {}, "granted": {}}
         self._load()
 
     @property
@@ -42,6 +42,7 @@ class DeviceStore:
         if isinstance(raw, dict):
             self._data["devices"] = dict(raw.get("devices") or {})
             self._data["pairing"] = dict(raw.get("pairing") or {})
+            self._data["granted"] = dict(raw.get("granted") or {})
 
     def _save(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -125,3 +126,18 @@ class DeviceStore:
         with self._lock:
             if self._data["pairing"].pop(device_id, None) is not None:
                 self._save()
+
+    # -- profile grants ---------------------------------------------------------
+    # Profiles this plugin approved a device in. Kept apart from enrollment: 'forget' resets a
+    # key, it does not revoke, so a re-enrolled device is still held to the default profile.
+
+    def record_grant(self, device_id: str, profile: str) -> None:
+        with self._lock:
+            granted = self._data["granted"].setdefault(device_id, [])
+            if profile not in granted:
+                granted.append(profile)
+                self._save()
+
+    def granted(self, device_id: str) -> bool:
+        with self._lock:
+            return bool(self._data["granted"].get(device_id))

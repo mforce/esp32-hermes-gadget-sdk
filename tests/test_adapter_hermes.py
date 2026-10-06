@@ -738,8 +738,7 @@ def test_one_closed_socket_does_not_stop_the_resets(hermes_home, gadget, make_si
 DEVICE = "hg-cccccccccccccccc"
 
 
-@pytest.fixture
-def routing_rig(hermes_home):
+def _routing_rig(device):
     """The real gateway resolvers around one gadget adapter (upstream's test_multiplex_transport_matrix.py rig)."""
     from gateway.config import GatewayConfig, Platform, PlatformConfig
     from gateway.pairing import PairingStore
@@ -753,13 +752,18 @@ def routing_rig(hermes_home):
     runner.config.platforms = {gadget: PlatformConfig(enabled=True, extra={})}
     # A static route a user may have configured before device selection existed.
     runner.config.profile_routes = parse_profile_routes(
-        [{"name": "old-route", "platform": "gadget", "profile": "ops", "user_id": DEVICE}])
+        [{"name": "old-route", "platform": "gadget", "profile": "ops", "user_id": device}])
     runner.pairing_store, runner.pairing_stores = PairingStore(profile="default"), {}
     runner._primary_profile_name = "default"
     adapter = GadgetAdapter(PlatformConfig(enabled=True, extra={"port": 0, "host": "127.0.0.1"}))
     adapter.gateway_runner = runner
     runner.adapters, runner._profile_adapters = {gadget: adapter}, {"ops": {}}
-    return runner, adapter, hermes_home
+    return runner, adapter
+
+
+@pytest.fixture
+def routing_rig(hermes_home):
+    return (*_routing_rig(DEVICE), hermes_home)
 
 
 def _session(profile, capable=True):
@@ -827,3 +831,161 @@ def test_an_unknown_profile_falls_back_to_the_launch_home(routing_rig):
     runner, adapter, home = routing_rig
     identity = resolve_identity(adapter._source(_session("nosuch")), runner=runner, adapter=adapter)
     assert identity.runtime_home == home
+
+
+class _RawDevice:
+    """A device speaking the handshake by hand, so a test chooses exactly what it claims in hello."""
+
+    def __init__(self, url, key, caps):
+        import base64
+
+        from websockets.sync.client import connect
+        from hermes_gadget_plugin import protocol
+
+        device = protocol.device_id_for_key(key)
+        self.ws = connect(url, subprotocols=["hermes-gadget.v1"])
+        self.ws.send(json.dumps({"type": "hello", "proto": 1, "device_id": device, "name": "Kitchen",
+                                 "board": "raw", "firmware": "0.1.0", "caps": caps}))
+        challenge = json.loads(self.ws.recv(timeout=5))
+        auth = ({"mac": protocol.auth_mac(key, device, challenge["nonce"])} if challenge["enrolled"]
+                else {"key": base64.b64encode(key).decode()})
+        self.ws.send(json.dumps({"type": "auth", **auth}))
+        self.welcome = json.loads(self.ws.recv(timeout=5))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.ws.close()
+
+
+@pytest.fixture
+def live_rig(hermes_home, loop_thread, tmp_path, monkeypatch):
+    """The adapter listening, behind Hermes's real authorization: its callbacks and per-profile
+    pairing stores, with an old static route sending the device to ops."""
+    import gateway.config as gateway_config
+    import plugins.plugin_storage as storage
+    from gateway.config import Platform
+    from gateway.pairing import PairingStore
+    from hermes_gadget_plugin import protocol
+
+    monkeypatch.setattr(storage, "plugin_data_dir", lambda name: tmp_path / "plugin-data" / name)
+    monkeypatch.setattr(gateway_config, "persist_home_channel", lambda home, **kw: None)
+    monkeypatch.delenv("GADGET_HOME_CHANNEL", raising=False)
+    key = bytes(range(1, 33))
+    device = protocol.device_id_for_key(key)
+    runner, adapter = _routing_rig(device)
+    runner.pairing_stores["ops"] = PairingStore(profile="ops")
+    adapter.set_authorization_check(runner._make_adapter_auth_check(Platform("gadget")))
+    events = []
+
+    async def handler(event):
+        events.append(event)
+
+    adapter.set_message_handler(handler)
+    assert loop_thread.run(adapter.connect())
+    url = f"ws://127.0.0.1:{adapter.hub.bound_port}/gadget"
+
+    def admits(source):
+        """Hermes's own ingress decision: canonicalize, then authorize."""
+        return runner._canonicalize(source, primary_home=hermes_home) is not None and \
+            runner._is_user_authorized_for_source(source)
+
+    def approve_default():
+        store = runner.pairing_store
+        store.approve_code("gadget", store.generate_code("gadget", device, "Kitchen"))
+
+    yield types.SimpleNamespace(
+        runner=runner, adapter=adapter, device=device, events=events, run=loop_thread.run, admits=admits,
+        approve_default=approve_default, connect=lambda caps: _RawDevice(url, key, caps))
+    loop_thread.run(adapter.cancel_background_tasks())
+    loop_thread.run(adapter.disconnect())
+
+
+def _admitted(rig, wait_s=1.5):
+    """Events Hermes would run, after giving dispatch a moment to deliver them."""
+    import time as _time
+
+    deadline = _time.monotonic() + wait_s
+    while _time.monotonic() < deadline:
+        if any(rig.admits(e.source) for e in rig.events):
+            break
+        _time.sleep(0.05)
+    return [(e.text, e.source.profile) for e in rig.events if rig.admits(e.source)]
+
+
+def test_dropping_the_profile_flag_does_not_reuse_a_plugin_grant(live_rig):
+    rig = live_rig
+    rig.approve_default()
+    with rig.connect({"profiles": True}) as device:
+        assert device.welcome["paired"] is True
+        session = rig.adapter.hub.get(rig.device)
+        assert rig.run(rig.adapter.select_profile(session, "ops")) is None  # the plugin approves it in ops
+    rig.runner.pairing_store.revoke("gadget", rig.device)
+    with rig.connect({}) as device:  # older firmware, same key, the old ops route still configured
+        assert device.welcome["paired"] is False
+        session = rig.adapter.hub.get(rig.device)
+        rig.run(rig.adapter.on_text(session, "m1", "hi"))
+        assert _admitted(rig) == []
+
+
+def test_a_replaced_connection_cannot_send_voice_after_revocation(live_rig, monkeypatch):
+    import asyncio
+    import threading
+
+    import hermes_gadget_plugin.adapter as adapter_module
+
+    rig = live_rig
+    rig.approve_default()
+    release = threading.Event()
+
+    async def slow_cache(data, ext):
+        await asyncio.to_thread(release.wait, 10)  # the upload is still being written
+        return "/tmp/utterance.wav"
+
+    monkeypatch.setattr(adapter_module, "cache_audio_from_bytes_async", slow_cache)
+    with rig.connect({"profiles": True}):
+        old = rig.adapter.hub.get(rig.device)
+        assert rig.run(rig.adapter.select_profile(old, "ops")) is None
+
+        async def speak():
+            return old.spawn(rig.adapter.on_utterance(old, "u1", b"RIFF", 1.0))
+
+        upload = rig.run(speak())
+    rig.runner.pairing_store.revoke("gadget", rig.device)
+    with rig.connect({"profiles": True}) as device:  # the device is back, now refused
+        assert device.welcome["paired"] is False
+        release.set()
+        rig.run(asyncio.wait_for(upload, 10))
+        assert _admitted(rig) == []
+
+
+def test_a_prompt_reply_needs_live_trust_and_the_current_connection(hermes_home, gadget, make_sim, monkeypatch):
+    from hermes_gadget_plugin.adapter import _Prompt
+
+    run, adapter = gadget.run, gadget.adapter
+    sim = _paired_sim(gadget, make_sim)
+    adapter._watch_task.cancel()  # no poll from here on: the cached paired flag stays True
+    session = adapter.hub.get(sim.status()["device_id"])
+    resolved = []
+    monkeypatch.setattr("tools.approval.resolve_gateway_approval", lambda *a, **kw: resolved.append(a) or True)
+
+    def ask(prompt_id):
+        adapter._prompts[session.device_id] = [
+            _Prompt(id=prompt_id, kind="approval", session_key="k", title="t", text="x")]
+
+    ask("q1")
+    adapter._owner_check = lambda *a, **kw: False  # revoked on the default profile, not yet polled
+    assert session.paired
+    run(adapter.on_prompt_reply(session, "q1", True))
+    assert resolved == []
+    adapter._owner_check = lambda *a, **kw: True
+    sim.console("reconnect")  # the same device on a new connection
+    assert sim.wait_for(lambda: adapter.hub.get(session.device_id) not in (None, session), timeout=10)
+    ask("q2")
+    run(adapter.on_prompt_reply(session, "q2", True))  # the old connection answers
+    assert resolved == []
+    current = adapter.hub.get(session.device_id)
+    ask("q3")
+    run(adapter.on_prompt_reply(current, "q3", True))
+    assert len(resolved) == 1
