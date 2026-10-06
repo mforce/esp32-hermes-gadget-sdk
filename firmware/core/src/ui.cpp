@@ -326,7 +326,7 @@ bool Ui::profile_hit(const UiModel& m, int x, int y) const {
 void Ui::draw_profile(Canvas& c, const UiModel& m) {
   const Chip r = profile_chip(m);
   if (!r.w) return;
-  c.fill_rect(r.x, r.y, r.w, r.h, panel_.round ? kBar : kBg);  // stands out from its bar, like the settings target
+  c.fill_rect(r.x, r.y, r.w, r.h, panel_.round ? kBar : kBg);  // stands out from its bar as a touch target
   c.text(r.x + (r.w - Canvas::text_width(r.text, r.scale)) / 2, r.y + (r.h - font::kGlyphHeight * r.scale) / 2, r.text,
          r.scale, kText);
 }
