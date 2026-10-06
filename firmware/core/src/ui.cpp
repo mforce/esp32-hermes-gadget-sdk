@@ -58,6 +58,16 @@ std::string fit(std::string_view s, int max_chars) {
 
 int cols_for(int width_px, int scale) { return width_px / (font::kCellWidth * scale); }
 
+const char* link_label(Link link) {
+  switch (link) {
+    case Link::Offline: return "NO NET";
+    case Link::Network: return "NET";
+    case Link::Connecting: return "LINK";
+    case Link::Online: return "ONLINE";
+  }
+  return "OFFLINE";
+}
+
 bool animated(Screen s) {
   switch (s) {
     case Screen::Boot:
@@ -195,7 +205,13 @@ void Ui::render(const UiModel& m) {
   const int y_bottom = h - layout_.bottom_h;
 
   uint32_t hashes[4];
-  hashes[0] = Hash().add(m.title).val(m.link).val(panel_.round && m.screen == Screen::Settings).val(panel_.round && m.settings_hold).get();
+  hashes[0] = Hash()
+                  .add(m.title)
+                  .val(m.link)
+                  .val(panel_.round && m.screen == Screen::Settings)
+                  .val(panel_.round && m.settings_hold)
+                  .add(m.profile)
+                  .get();
   hashes[1] = Hash()
                   .val(m.screen)
                   .add(m.headline)
@@ -206,7 +222,7 @@ void Ui::render(const UiModel& m) {
   hashes[2] = Hash().val(m.screen).add(m.detail).add(m.body).add(m.code).val(m.scroll).val(m.color_test)
                   .val(m.qr ? m.qr->size : 0)
                   .get();
-  hashes[3] = Hash().add(m.hint).get();
+  hashes[3] = Hash().add(m.hint).add(m.profile).get();
 
   if (m.hero) {
     // Hero mode: top bar, one mascot band, bottom bar.
@@ -270,14 +286,8 @@ void Ui::draw_top(Canvas& c, const UiModel& m) {
   const int s = layout_.scale;
   const int w = info_.width;
   c.fill_rect(0, 0, w, layout_.top_h, panel_.round ? kBg : kBar);
-  uint16_t dot = kRed;
-  const char* label = "OFFLINE";
-  switch (m.link) {
-    case Link::Offline: dot = kRed; label = "NO NET"; break;
-    case Link::Network: dot = kYellow; label = "NET"; break;
-    case Link::Connecting: dot = kYellow; label = "LINK"; break;
-    case Link::Online: dot = kGreen; label = "ONLINE"; break;
-  }
+  const uint16_t dot = m.link == Link::Online ? kGreen : m.link == Link::Offline ? kRed : kYellow;
+  const char* label = link_label(m.link);
   int ty = s;
   if (panel_.round) {
     // The settings hold target: a dim label under the link dot, with no bar
@@ -296,8 +306,46 @@ void Ui::draw_top(Canvas& c, const UiModel& m) {
   c.text(label_x, ty, label, s, kDim);
   int r = std::max(2, 3 * s / 2 + 1);
   c.fill_circle(label_x - 3 * s - r, layout_.top_h / 2, r, dot);
-  int title_cols = cols_for(label_x - 6 * s - 2 * r - pad, s);
+  const Rect chip = profile_rect(m);
+  const int title_end = chip.w ? chip.x - 3 * s : label_x - 6 * s - 2 * r;
+  int title_cols = cols_for(title_end - pad, s);
   c.text(pad, ty, fit(m.title, title_cols), s, kText);
+  draw_profile(c, m);
+}
+
+Ui::Rect Ui::profile_rect(const UiModel& m) const {
+  Rect rect;
+  if (m.profile.empty()) return rect;
+  const int s = layout_.scale;
+  const int max_w = info_.width / 3;
+  const std::string name = fit(m.profile, cols_for(max_w - 6 * s, s));
+  rect.w = std::min(max_w, std::max(24 * s, Canvas::text_width(name, s) + 6 * s));
+  if (panel_.round) {
+    rect.h = layout_.bottom_h;
+    rect.x = (info_.width - rect.w) / 2;
+    rect.y = info_.height - layout_.bottom_h;
+  } else {
+    // Left of the link dot and label, as draw_top places them.
+    const int r = std::max(2, 3 * s / 2 + 1);
+    const int dot_left = info_.width - 3 * s - panel_.corner_inset - Canvas::text_width(link_label(m.link), s) - 3 * s - 2 * r;
+    rect.h = layout_.top_h;
+    rect.x = dot_left - 3 * s - rect.w;
+  }
+  return rect;
+}
+
+bool Ui::profile_hit(const UiModel& m, int x, int y) const {
+  const Rect r = profile_rect(m);
+  return r.w > 0 && x >= ox_ + r.x && x < ox_ + r.x + r.w && y >= oy_ + r.y && y < oy_ + r.y + r.h;
+}
+
+void Ui::draw_profile(Canvas& c, const UiModel& m) {
+  const Rect r = profile_rect(m);
+  if (!r.w) return;
+  const int s = layout_.scale;
+  const std::string name = fit(m.profile, cols_for(r.w - 6 * s, s));
+  c.fill_rect(r.x, r.y, r.w, r.h, kBg);
+  c.text(r.x + (r.w - Canvas::text_width(name, s)) / 2, r.y + (r.h - font::kGlyphHeight * s) / 2, name, s, kText);
 }
 
 void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
@@ -659,6 +707,10 @@ void Ui::draw_bottom(Canvas& c, const UiModel& m) {
   const int s = layout_.scale;
   const int y0 = info_.height - layout_.bottom_h;
   c.fill_rect(0, y0, info_.width, layout_.bottom_h, panel_.round ? kBg : kBar);
+  if (panel_.round && !m.profile.empty()) {
+    draw_profile(c, m);
+    return;
+  }
   std::string hint = fit(m.hint, cols_for(info_.width - 4 * s, s));
   c.text((info_.width - Canvas::text_width(hint, s)) / 2, y0 + s, hint, s, kDim);
 }

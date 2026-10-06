@@ -8,7 +8,11 @@ namespace hg {
 bool App::settings_hold_live() const { return !prompt_showing() && !ota_busy() && !wifi_setup_open(); }
 
 bool App::settings_title_hit(int x, int y) const {
-  return ui_ && settings_hold_live() && ui_->title_hit(x, y);
+  return ui_ && settings_hold_live() && ui_->title_hit(x, y) && !profile_hit(x, y);  // the chip is its own target
+}
+
+bool App::profile_hit(int x, int y) const {
+  return ui_ && !display_sleeping_ && ui_->profile_hit(model_, x, y);
 }
 
 bool App::open_settings() {
