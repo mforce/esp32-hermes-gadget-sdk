@@ -164,7 +164,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         self._registry_key = "default"
         self._prompts: Dict[str, List[_Prompt]] = {}  # device id -> questions, oldest (shown) first
         self._new_requested: Dict[str, float] = {}  # device id -> when it asked for a new session
-        self._owner_check = None  # set lazily from the runner; tests set it directly
+        self._owner_check = None  # the default profile's auth check, built from the runner on first use
 
     # -- lifecycle ------------------------------------------------------------------
 
