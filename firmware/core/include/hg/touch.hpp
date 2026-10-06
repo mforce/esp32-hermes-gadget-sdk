@@ -1,11 +1,11 @@
 // Touchscreen gestures mapped onto the gadget's buttons, for boards whose
 // screen is the main input:
 //
-//   hold the title     local settings after one second
-//   hold the profile chip   switch to the next Hermes profile after one second
-//   hold elsewhere     TALK, held for as long as the finger stays down
-//   quick tap          a TALK press and release (answers "yes" to a question)
-//   swipe down         a CANCEL press and release (discard, close, stop, "no")
+//   hold the title          local settings after one second
+//   hold the profile chip   the next Hermes profile after one second
+//   hold elsewhere          TALK, held for as long as the finger stays down
+//   quick tap               a TALK press and release (answers "yes" to a question)
+//   swipe down              a CANCEL press and release (discard, close, stop, "no")
 //
 // Feed it raw touch samples; it calls App::on_button. Portable and clock-free,
 // so the simulator and the tests drive it exactly like the firmware does.
