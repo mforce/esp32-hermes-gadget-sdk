@@ -186,6 +186,17 @@ struct Rig {
     server(std::string(R"({"type":"welcome","session":"s1","heartbeat_s":20,"paired":)") +
            (paired ? "true" : "false") + "}");
   }
+
+  // Like bring_online(true), against a server that offers two Hermes profiles.
+  void bring_online_with_profiles(const std::string& current = "default") {
+    app.begin();
+    app.on_network(true, "test-wifi");
+    advance(1000);
+    app.on_transport_open();
+    server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":false})");
+    server(R"({"type":"welcome","session":"s1","heartbeat_s":20,"paired":true,"profile":")" + current +
+           R"(","profiles":[{"id":"default","name":"Hermes"},{"id":"ops","name":"Ops"}]})");
+  }
 };
 
 }  // namespace
@@ -1278,4 +1289,103 @@ TEST("Wi-Fi setup: opening from USB releases an active talk button") {
   CHECK(!r.app.wifi_setup_open());
   r.advance(30000);
   CHECK_EQ(r.fake.brightness, 0);
+}
+
+TEST("profiles: hello offers switching; welcome brings the roster") {
+  Rig r;
+  r.app.begin();
+  r.app.on_network(true, "wifi");
+  r.advance(1000);
+  r.app.on_transport_open();
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello != nullptr);
+  if (!hello) return;
+  CHECK((*hello)["caps"]["profiles"].as_bool());
+  CHECK(!hello->has("profile"));  // default is implied
+  r.server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":false})");
+  r.server(R"({"type":"welcome","session":"s1","heartbeat_s":20,"paired":true,"profile":"ops",)"
+           R"("profiles":[{"id":"default","name":"Hermes"},{"id":"ops","name":"Ops"}]})");
+  CHECK_EQ(r.app.agent_profile(), std::string("ops"));
+  CHECK_EQ(r.app.agent_profile_name(), std::string("Ops"));
+  CHECK(r.app.status_json().find("\"profile\":\"ops\"") != std::string::npos);
+  CHECK_EQ(r.fake.kv["profile"], std::string("ops"));
+}
+
+TEST("profiles: settings ask Hermes for the next profile and keep what it confirms") {
+  Rig r;
+  r.bring_online_with_profiles();
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 3; ++i) r.app.console("cancel");  // Volume -> Brightness -> Talk mode -> Profile
+  CHECK_EQ(r.app.model().detail, std::string("Hermes profile"));
+  CHECK(r.app.model().body.find("Hermes") != std::string::npos);
+  r.app.console("talk");
+  r.app.console("release");
+  const Value* select = r.fake.last("profile.select");
+  CHECK(select != nullptr);
+  if (select) CHECK_EQ((*select)["profile"].as_string(), std::string("ops"));
+  CHECK(r.fake.kv.count("profile") == 0);  // nothing changes until Hermes confirms
+  r.server(R"({"type":"profile","profile":"ops"})");
+  CHECK_EQ(r.fake.kv["profile"], std::string("ops"));
+  CHECK(r.app.model().body.find("Ops") != std::string::npos);
+  r.server(R"({"type":"profile","profile":"ops","error":"busy"})");  // a refusal keeps the current one
+  CHECK_EQ(r.app.agent_profile(), std::string("ops"));
+
+  Rig reboot;
+  reboot.fake.kv = r.fake.kv;
+  reboot.app.begin();
+  reboot.app.on_network(true, "wifi");
+  reboot.advance(1000);
+  reboot.app.on_transport_open();
+  const Value* hello = reboot.fake.last("hello");
+  CHECK(hello != nullptr);
+  if (hello) CHECK_EQ((*hello)["profile"].as_string(), std::string("ops"));
+}
+
+TEST("profiles: without a roster the settings menu has no profile entry") {
+  Rig r;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 3; ++i) r.app.console("cancel");
+  CHECK_EQ(r.app.model().detail, std::string("Microphone check"));
+  CHECK(!r.app.next_agent_profile());
+}
+
+TEST("profiles: no switching while a turn runs or before pairing") {
+  Rig r;
+  r.bring_online_with_profiles();
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  CHECK(!r.app.next_agent_profile());
+  Rig unpaired;  // a roster, but not approved yet: only the pairing guard can refuse
+  unpaired.app.begin();
+  unpaired.app.on_network(true, "wifi");
+  unpaired.advance(1000);
+  unpaired.app.on_transport_open();
+  unpaired.server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":false})");
+  unpaired.server(R"({"type":"welcome","session":"s1","heartbeat_s":20,"paired":false,"profile":"default",)"
+                  R"("profiles":[{"id":"default","name":"Hermes"},{"id":"ops","name":"Ops"}]})");
+  CHECK(!unpaired.app.next_agent_profile());
+}
+
+TEST("profiles: a stored profile Hermes no longer offers is dropped; the console cannot set one") {
+  Rig r;
+  r.fake.kv["profile"] = "gone";
+  r.app.begin();
+  r.app.on_network(true, "wifi");
+  r.advance(1000);
+  r.app.on_transport_open();
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello != nullptr);
+  if (hello) CHECK_EQ((*hello)["profile"].as_string(), std::string("gone"));
+  r.server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":false})");
+  r.server(R"({"type":"welcome","session":"s1","heartbeat_s":20,"paired":true,"profile":"default",)"
+           R"("profiles":[{"id":"default","name":"Hermes"},{"id":"ops","name":"Ops"}]})");
+  CHECK_EQ(r.app.agent_profile(), std::string("default"));
+  CHECK(r.fake.kv.count("profile") == 0);
+  CHECK_EQ(r.app.console("set profile ops"), std::string("@error unknown key"));
+  r.server(R"({"type":"profile","profile":"default","error":"busy"})");
+  CHECK(r.app.model().detail.find("busy") != std::string::npos);  // refusals are visible on Ready
+  r.server(R"({"type":"profile","profile":"ops"})");
+  CHECK_EQ(r.fake.kv["profile"], std::string("ops"));
+  r.app.console("factory-reset");
+  CHECK(r.fake.kv.count("profile") == 0);  // fails without the explicit erase
 }
