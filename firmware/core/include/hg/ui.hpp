@@ -6,6 +6,7 @@
 // same pixels, which is what the simulator's screenshot tests rely on.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -85,7 +86,9 @@ class Ui {
   // Body text rows visible on a text screen for this model (after detail lines).
   int body_rows(const UiModel& m) const;
   bool title_hit(int x, int y) const {
-    return x >= ox_ && x < ox_ + info_.width && y >= oy_ && y < oy_ + layout_.top_h;
+    const int width = panel_.round ? std::min<int>(info_.width, 120 * layout_.scale) : info_.width;
+    const int left = ox_ + (info_.width - width) / 2;
+    return x >= left && x < left + width && y >= oy_ && y < oy_ + layout_.top_h;
   }
 
  private:

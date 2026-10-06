@@ -9,7 +9,16 @@
 
 namespace hgp {
 
-enum class LcdController { St7789, Box3, CoreS3 };
+// How an I80 panel is wired: eight data lines and a write strobe.
+struct LcdBus {
+  enum class Type : uint8_t { Spi, I80 };
+  Type type = Type::Spi;
+  int data[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  int wr = -1;
+  int pclk_mhz = 16;
+};
+
+enum class LcdController { St7789, Box3, CoreS3, St77916 };
 
 struct LcdConfig {
   bool enabled = false;
@@ -18,8 +27,11 @@ struct LcdConfig {
   int gap_x = 0, gap_y = 0;
   int mosi = -1, sclk = -1, cs = -1, dc = -1, rst = -1, backlight = -1;
   int spi_mhz = 40;
+  LcdBus bus{};
   LcdController controller = LcdController::St7789;
   bool reset_active_high = false;
+  int d1 = -1, d2 = -1, d3 = -1;  // QSPI data0 uses mosi
+  bool round = false;
 };
 
 struct I2sMicConfig {
@@ -58,10 +70,11 @@ struct CodecAudioConfig {
   float amp_supply_v = 5.0f;  // amplifier supply; the ES8311 driver sets its output level from it
   float mic_gain_db = 24.0f;
   SpeakerCodec speaker = SpeakerCodec::Es8311;
+  bool stereo32 = false;  // Waveshare V2: 64 BCLK/frame, RMNM ADC packing
 };
 
 // Capacitive touch on the I2C bus: hold to talk, tap, swipe down to cancel.
-enum class TouchController { Cst9217, Box3, Ft5x06 };
+enum class TouchController { Cst9217, Box3, Ft5x06, Cst816 };
 
 struct TouchConfig {
   bool enabled = false;
@@ -85,9 +98,16 @@ struct ButtonConfig {
   int talk = -1, cancel = -1, up = -1, down = -1;  // active-low GPIOs, -1 = absent
 };
 
+// A battery behind a resistive divider, with a latch that keeps it powered.
 struct LatchPowerConfig {
   bool enabled = false;
   int adc = -1, enable = -1, charging = -1;
+  int backlight = -1;
+  // VBAT = VADC * ratio. Waveshare's LCD-1.54 divides by three; the T-Display-S3
+  // divides by two. Ignored when the ADC pin is -1.
+  int mv_ratio = 3;
+  uint16_t max_battery_mv = 4998;
+  bool power_off_supported = true;
 };
 
 struct BoardConfig {
@@ -104,11 +124,16 @@ struct BoardConfig {
   bool axp2101 = false;
   bool axp_audio_supply = false;
   bool cores3 = false;
+  bool tca9554_resets = false;  // 1.85C: P0 touch reset, P1 LCD reset
   LatchPowerConfig latch_power;
   int status_led = -1;
   const char* talk_label = "TALK";
   const char* cancel_label = "CANCEL";
 };
+
+// GPIO held high to power the panel's peripheral rail. Boards without one
+// leave it -1; the driver must see it high before it initialises the panel.
+int lcd_power_pin(const BoardConfig& b);
 
 const BoardConfig& board_config();
 

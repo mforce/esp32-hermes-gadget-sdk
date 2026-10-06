@@ -24,6 +24,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_lcd_panel_io.h"
+#include "esp_lcd_io_i80.h"
 #include "esp_lcd_types.h"
 #include "esp_lcd_touch.h"
 #include "esp_websocket_client.h"
@@ -132,6 +133,7 @@ class SpiDisplay final : public hg::Display {
   uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
   int bounce_rows_ = 0;
   SemaphoreHandle_t done_ = nullptr;
+  bool transfer_failed_ = false;  // Keep a potentially DMA-owned buffer untouched after failure.
 };
 
 // I2S MEMS microphone: a reader task posts 20 ms PCM16 chunks while capturing.
@@ -170,6 +172,30 @@ class I2sSpeaker final : public hg::AudioOut {
   std::atomic<uint8_t> volume_{70};
 };
 
+// I80 (8-bit parallel) ST7789 panel via esp_lcd. Panels on LCD modules that
+// wire the controller to a parallel bus rather than SPI, e.g. LilyGO's
+// T-Display-S3. Same framebuffer and bounce-buffer scheme as SpiDisplay.
+class ParallelDisplay final : public hg::Display {
+ public:
+  bool begin(const LcdConfig& cfg, int power_pin);
+  hg::DisplayInfo info() const override;
+  uint16_t* framebuffer() override { return fb_; }
+  void flush(uint16_t y0, uint16_t y1) override;
+  void set_backlight(uint8_t percent) override;
+
+ private:
+  static bool on_trans_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t* edata, void* ctx);
+  LcdConfig cfg_{};
+  esp_lcd_i80_bus_handle_t i80_ = nullptr;
+  esp_lcd_panel_io_handle_t io_ = nullptr;
+  esp_lcd_panel_handle_t panel_ = nullptr;
+  uint16_t* fb_ = nullptr;
+  uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
+  int bounce_rows_ = 0;
+  uint8_t backlight_level_ = 0;
+  SemaphoreHandle_t done_ = nullptr;
+};
+
 // QSPI AMOLED (CO5300) via esp_lcd panel IO. Same framebuffer and bounce-buffer
 // scheme as SpiDisplay; the controller wants even window coordinates.
 class AmoledDisplay final : public hg::Display {
@@ -189,6 +215,8 @@ class AmoledDisplay final : public hg::Display {
   uint16_t* bounce_ = nullptr;
   SemaphoreHandle_t done_ = nullptr;
 };
+
+bool ws185_reset_peripherals(i2c_master_bus_handle_t bus);
 
 namespace i2c {
 // The board's shared I2C master bus (created on first use).
@@ -211,19 +239,21 @@ class CodecAudio {
 
 class CodecMic final : public hg::AudioIn {
  public:
-  bool begin(esp_codec_dev_handle_t dev);
+  bool begin(esp_codec_dev_handle_t dev, bool stereo32 = false);
   bool start(uint32_t sample_rate) override;
   void stop() override { capturing_ = false; }
 
  private:
   static void task(void* arg);
   esp_codec_dev_handle_t dev_ = nullptr;
+  bool stereo32_ = false;
+  int16_t* raw_ = nullptr;
   std::atomic<bool> capturing_{false};
 };
 
 class CodecSpeaker final : public hg::AudioOut {
  public:
-  bool begin(esp_codec_dev_handle_t dev);
+  bool begin(esp_codec_dev_handle_t dev, bool stereo32 = false, int pa = -1);
   bool begin(uint32_t sample_rate) override;
   void write(const int16_t* samples, size_t count) override;
   void end() override;
@@ -234,6 +264,11 @@ class CodecSpeaker final : public hg::AudioOut {
  private:
   static void task(void* arg);
   esp_codec_dev_handle_t dev_ = nullptr;
+  bool stereo32_ = false;
+  int32_t* stereo_ = nullptr;
+  int pa_ = -1;
+  std::mutex pa_lock_;  // V2 GPIO/generation/nonblocking queue operations; never codec I/O.
+  uint32_t pa_generation_ = 0;
   StreamBufferHandle_t buffer_ = nullptr;
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
@@ -287,6 +322,7 @@ class LatchPower final : public hg::Power {
  public:
   bool begin(const LatchPowerConfig& cfg);
   std::optional<hg::PowerStatus> read() override;
+  bool can_power_off() const override { return cfg_.power_off_supported; }
   bool power_off() override;
 
  private:

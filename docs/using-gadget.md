@@ -20,7 +20,7 @@ If speech is missing, check [audio setup](connect-hermes.md#4-enable-speech). Fo
 
 ## Device settings and hardware checks
 
-Hold TALK and CANCEL together for one second to open or close device settings. On a touchscreen, hold the title bar for one second. Settings also work while the device is offline. Opening settings stops the current recording or reply.
+Hold TALK and CANCEL together for one second to open or close device settings. On a touchscreen, hold the title bar for one second. Round displays show a larger **SETTINGS** target beneath the status dot; hold that target for one second instead of the physical top edge. Touches in this target do not start recording. While settings is open, its label changes to **BACK TO HERMES**; hold it again for one second to return. Settings also work while the device is offline. Opening settings stops the current recording or reply.
 
 Tap CANCEL to move to the next item, then tap TALK to change it. On a touchscreen, swipe down for the next item and tap to select. Boards with Up and Down buttons can move in either direction. Select **Back to Hermes** to leave.
 

@@ -18,6 +18,10 @@ namespace {
 #define HG_BOARD_NAME "esp32-s3-box-3"
 #elif CONFIG_HG_BOARD_CORES3
 #define HG_BOARD_NAME "m5stack-cores3"
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_185C_V2
+#define HG_BOARD_NAME "waveshare-esp32-s3-touch-lcd-1.85c-v2"
+#elif CONFIG_HG_BOARD_T_DISPLAY_S3
+#define HG_BOARD_NAME "tdisplay-s3"
 #elif CONFIG_HG_BOARD_WS_ESP32S3_LCD_154
 #define HG_BOARD_NAME "waveshare-esp32s3-lcd-154"
 #else
@@ -97,6 +101,45 @@ BoardConfig make() {
 #endif
   return b;
 }
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_185C_V2
+// Rev2.0 only. Pins and RMNM audio packing: Waveshare factory demo and V2
+// schematic, pinned sources in docs/hardware.md. Not compatible with V1.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::St77916;
+  b.lcd.width = b.lcd.height = 360;
+  b.lcd.swap_xy = b.lcd.mirror_x = b.lcd.mirror_y = false;
+  b.lcd.invert = true;
+  b.lcd.round = true;
+  b.lcd.sclk = 40;
+  b.lcd.mosi = 46;
+  b.lcd.d1 = 45;
+  b.lcd.d2 = 42;
+  b.lcd.d3 = 41;
+  b.lcd.cs = 21;
+  b.lcd.backlight = 5;
+  b.lcd.spi_mhz = 80;
+  b.i2c = {11, 10, 400000};
+  b.tca9554_resets = true;
+  b.codec.enabled = true;
+  b.codec.mclk = 2;
+  b.codec.bclk = 48;
+  b.codec.ws = 38;
+  b.codec.dout = 47;
+  b.codec.din = 39;
+  b.codec.pa = 15;
+  b.codec.stereo32 = true;
+  b.touch.enabled = true;
+  b.touch.controller = TouchController::Cst816;
+  b.touch.addr = 0x15;
+  b.touch.width = b.touch.height = 360;
+  b.buttons = {0, -1, -1, -1};
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  return b;
+}
 #elif CONFIG_HG_BOARD_WS_ESP32S3_LCD_154
 // Waveshare ESP32-S3-LCD-1.54 (SKUs 33866/33867, the non-touch version): 1.54"
 // 240x240 ST7789 over SPI, ES8311 speaker DAC + ES7210 microphone ADC on one
@@ -153,7 +196,7 @@ BoardConfig make() {
   b.lcd.cs = 5;
   b.lcd.dc = 4;
   b.lcd.rst = 48;
-  b.lcd.reset_active_high = true;  // Shared LCD/touch reset through an inverter.
+  b.lcd.reset_active_high = true;
   b.lcd.backlight = 47;
   b.i2c = {8, 18, 400000};
   b.codec = {true, 2, 17, 45, 15, 16, 46};
@@ -194,6 +237,45 @@ BoardConfig make() {
   b.touch.height = 240;
   b.talk_label = "Hold screen";
   b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_T_DISPLAY_S3
+// LilyGO T-Display-S3: 1.9" 170x320 ST7789 on an 8-bit i80 parallel bus, BOOT
+// (GPIO 0) and Button2 (GPIO 14), battery ADC on GPIO 4 behind a 1:2 divider.
+// GPIO 15 gates the panel's peripheral rail and must be high before the display
+// is initialised, or the screen stays dark on battery.
+// Pins: docs/hardware.md#lilygo-t-display-s3 (LilyGO's own examples).
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.width = 320;
+  b.lcd.height = 170;
+  b.lcd.swap_xy = true;
+  b.lcd.mirror_x = false;
+  b.lcd.mirror_y = true;
+  b.lcd.invert = true;
+  b.lcd.gap_x = 0;
+  b.lcd.gap_y = 35;
+  b.lcd.cs = 6;
+  b.lcd.dc = 7;
+  b.lcd.rst = 5;
+  b.lcd.backlight = 38;
+  b.lcd.bus.type = LcdBus::Type::I80;
+  b.lcd.bus.data[0] = 39;
+  b.lcd.bus.data[1] = 40;
+  b.lcd.bus.data[2] = 41;
+  b.lcd.bus.data[3] = 42;
+  b.lcd.bus.data[4] = 45;
+  b.lcd.bus.data[5] = 46;
+  b.lcd.bus.data[6] = 47;
+  b.lcd.bus.data[7] = 48;
+  b.lcd.bus.wr = 8;
+  b.lcd.bus.pclk_mhz = 16;
+  b.latch_power = {true, 4, 15, -1, 38, 2, 4300, false};
+  b.buttons = {0, 14, -1, -1};
+  b.talk_label = "BOOT";
+  b.cancel_label = "B2";
   return b;
 }
 #elif CONFIG_HG_BOARD_CUSTOM
@@ -259,6 +341,17 @@ BoardConfig make() {
 const BoardConfig& board_config() {
   static const BoardConfig config = make();
   return config;
+}
+
+int lcd_power_pin(const BoardConfig& b) {
+  // The T-Display-S3's panel rail is gated by GPIO 15. It reuses the battery
+  // latch's enable pin, so report it from there rather than from the LCD config.
+#if CONFIG_HG_BOARD_T_DISPLAY_S3
+  return b.latch_power.enable;
+#else
+  (void)b;
+  return -1;
+#endif
 }
 
 }  // namespace hgp

@@ -33,21 +33,43 @@ esp_err_t error_response(httpd_req_t* req, const char* status, const std::string
   return httpd_resp_sendstr(req, result.dump().c_str());
 }
 
+bool socket_ipv4(int fd, bool peer, uint32_t& ip) {
+  sockaddr_storage address{};
+  socklen_t length = sizeof(address);
+  const int result = peer ? getpeername(fd, reinterpret_cast<sockaddr*>(&address), &length)
+                          : getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length);
+  if (result != 0) return false;
+  if (address.ss_family == AF_INET && length >= sizeof(sockaddr_in)) {
+    ip = reinterpret_cast<const sockaddr_in*>(&address)->sin_addr.s_addr;
+    return true;
+  }
+#if CONFIG_LWIP_IPV6
+  if (address.ss_family == AF_INET6 && length >= sizeof(sockaddr_in6)) {
+    const auto* bytes = reinterpret_cast<const sockaddr_in6*>(&address)->sin6_addr.s6_addr;
+    // ESP-IDF's dual-stack HTTP listener represents IPv4 peers as ::ffff:a.b.c.d.
+    // Accept only mapped IPv4, never an arbitrary native IPv6 address.
+    static const uint8_t mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    if (std::memcmp(bytes, mapped, sizeof(mapped)) != 0) return false;
+    std::memcpy(&ip, bytes + 12, sizeof(ip));
+    return true;
+  }
+#endif
+  return false;
+}
+
 bool local_request(httpd_req_t* req) {
-  sockaddr_in local{}, peer{};
-  socklen_t length = sizeof(local);
+  uint32_t local = 0, peer = 0;
+  const int fd = httpd_req_to_sockfd(req);
   esp_netif_ip_info_t info{};
   auto* ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
   if (!ap || esp_netif_get_ip_info(ap, &info) != ESP_OK ||
-      getsockname(httpd_req_to_sockfd(req), reinterpret_cast<sockaddr*>(&local), &length) != 0 ||
-      local.sin_family != AF_INET || local.sin_addr.s_addr != info.ip.addr) return false;
+      !socket_ipv4(fd, false, local) || local != info.ip.addr) return false;
   esp_netif_ip_info_t station{};
   auto* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   if (sta && esp_netif_get_ip_info(sta, &station) == ESP_OK && station.ip.addr &&
       (station.ip.addr & station.netmask.addr) == (info.ip.addr & station.netmask.addr)) return false;
-  length = sizeof(peer);
-  if (getpeername(httpd_req_to_sockfd(req), reinterpret_cast<sockaddr*>(&peer), &length) != 0 ||
-      peer.sin_family != AF_INET || (peer.sin_addr.s_addr & info.netmask.addr) != (info.ip.addr & info.netmask.addr)) return false;
+  if (!socket_ipv4(fd, true, peer) ||
+      (peer & info.netmask.addr) != (info.ip.addr & info.netmask.addr)) return false;
   char host[32], origin[64];
   if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK ||
       (std::strcmp(host, "192.168.4.1") && std::strcmp(host, "192.168.4.1:80"))) return false;

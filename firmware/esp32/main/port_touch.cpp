@@ -7,6 +7,7 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "ws185.hpp"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_lcd_touch_tt21100.h"
 #include "esp_lcd_touch_ft5x06.h"
@@ -59,9 +60,13 @@ bool TouchInput::begin(const TouchConfig& touch, const ExpanderKeyConfig& key, i
     dev.device_address = touch.addr;
     dev.scl_speed_hz = 400000;
     if (i2c_master_bus_add_device(bus, &dev, &touch_dev_) == ESP_OK) {
-      const uint8_t command_mode[2] = {0xD1, 0x01};
+      const uint8_t command_mode[2] = {touch.controller == TouchController::Cst816 ? uint8_t(0xFE) : uint8_t(0xD1), 0x01};
       if (i2c_master_transmit(touch_dev_, command_mode, sizeof(command_mode), 50) != ESP_OK) {
         ESP_LOGW(TAG, "touch controller at 0x%02x did not answer", touch.addr);
+        if (touch.controller == TouchController::Cst816) {
+          i2c_master_bus_rm_device(touch_dev_);
+          touch_dev_ = nullptr;
+        }
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -87,6 +92,12 @@ bool TouchInput::read_touch(TouchSample& out) {
     const bool down = esp_lcd_touch_get_coordinates(managed_touch_, &x, &y, nullptr, &points, 1);
     out = {down && points > 0, static_cast<int16_t>(x), static_cast<int16_t>(y)};
     return true;
+  }
+  if (touch_.controller == TouchController::Cst816) {
+    const uint8_t reg = 0x02;
+    uint8_t data[5] = {};
+    if (i2c_master_transmit_receive(touch_dev_, &reg, 1, data, sizeof(data), 20) != ESP_OK) return false;
+    return hg::ws185_touch(data, out.touching, out.x, out.y);
   }
   const uint8_t reg[2] = {0xD0, 0x00};
   if (i2c_master_transmit(touch_dev_, reg, sizeof(reg), 20) != ESP_OK) return false;
@@ -146,12 +157,27 @@ bool TouchInput::read_key(bool& pressed) {
 void TouchInput::task(void* arg) {
   auto* self = static_cast<TouchInput*>(arg);
   bool was_touching = false, key_down = false;
+  hg::Ws185TouchFault fault;
+  TouchSample last{};
   for (;;) {
     TouchSample s{};
     if (self->has_touch() && self->read_touch(s)) {
+      fault.valid();
       // Every sample while the finger is down (gestures need the motion), plus the lift.
-      if (s.touching || was_touching) events::post(EventType::Touch, &s, sizeof(s));
-      was_touching = s.touching;
+      if (s.touching || was_touching) {
+        // Keep the delivered state until enqueue succeeds, including a lift.
+        if (events::post(EventType::Touch, &s, sizeof(s))) was_touching = s.touching;
+      }
+      last = s;
+    } else if (self->touch_.controller == TouchController::Cst816 &&
+               fault.release_due(was_touching)) {
+      // Five failed polls (~100–200 ms plus scheduler delay): release once.
+      // Retry if the event queue is full; do not silently lose the release.
+      last.touching = false;
+      if (events::post(EventType::Touch, &last, sizeof(last))) {
+        was_touching = false;
+        ESP_LOGW(TAG, "CST816 fault: held touch released after five failed polls");
+      }
     }
     bool pressed = false;
     if (self->key_dev_ && self->read_key(pressed) && pressed != key_down) {

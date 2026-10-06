@@ -33,6 +33,27 @@ CoreS3's ILI9342E initialization table follows [Espressif's CoreS3 BSP](https://
 
 The AMOLED panel's start-up register values in `firmware/esp32/main/port_amoled.cpp` follow Waveshare's [board support package](https://components.espressif.com/components/waveshare/esp32_s3_touch_amoled_1_75) for the ESP32-S3-Touch-AMOLED-1.75 (Apache 2.0, text in [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)); see [NOTICE](NOTICE). The 1.75C profile reuses that driver and its license notice. Its pin map and audio supply configuration follow the [manufacturer's schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75C/ESP32-S3-Touch-AMOLED-1.75C-schematic.pdf).
 
+The Waveshare 1.85C V2 port uses Espressif's managed
+[ST77916 driver](https://components.espressif.com/components/espressif/esp_lcd_st77916)
+2.0.2 (Apache 2.0). `firmware/esp32/main/panel_ws185.hpp` adapts the two active
+initialization tables from Waveshare's factory demo at commit
+`8ead4a96bf3a278fc4ebd8ef4768657e17fa2880` in
+[ESP32-S3-Touch-LCD-1.85C](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C),
+`ESP-IDF/ESP32-S3-Touch-LCD-1.85C-Test/main/LCD_Driver/ST77916.c` and
+`esp_lcd_st77916/esp_lcd_st77916.c` (Apache 2.0). Changes: C++ byte-string
+payloads, removal of commented-out entries, named tables selected by panel ID.
+The upstream driver copyright is Espressif Systems (Shanghai) CO LTD, 2023;
+see the source header and [NOTICE](NOTICE). The reset, CST816 register reader
+and PCM conversion adapters are original code using documented hardware facts.
+The existing `LICENSES/Apache-2.0.txt` supplies the license text; packaging
+includes it, this attribution, and the managed driver licenses.
+
+The T-Display-S3 ST7789 initialization values and AW9364 backlight control follow
+[LilyGO's factory example](https://github.com/Xinyuan-LilyGO/T-Display-S3/blob/ec889e789b3cf093412689a143f7f37b42b56af7/examples/factory/factory.ino),
+revision `ec889e789b3cf093412689a143f7f37b42b56af7`, MIT, Copyright (c) 2022 Xinyuan-LilyGO.
+The ESP-IDF adaptation and timing changes are recorded in [NOTICE](NOTICE), with
+the upstream license in [LICENSES/LilyGO-MIT.txt](LICENSES/LilyGO-MIT.txt).
+
 ## Release packages
 
 Firmware packages include `hermes-gadget-<version>-licenses.zip` with this document, the project's notices, license texts, and notices found in the installed ESP-IDF and managed component sources. The browser installer links that archive when the release supplies it.

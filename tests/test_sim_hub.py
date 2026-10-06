@@ -253,9 +253,10 @@ def test_holding_cancel_starts_a_new_session(devserver, make_sim):
                         timeout=5)
 
 
-def test_round_touch_board_talks_with_the_screen(devserver, make_sim):
+@pytest.mark.parametrize("board", ["sim-466x466-round", "sim-360x360-round"])
+def test_round_touch_board_talks_with_the_screen(devserver, make_sim, board):
     hub, _brain, url = devserver()
-    sim = make_sim(url, board="sim-466x466-round")
+    sim = make_sim(url, board=board)
     assert sim.wait_screen("ready", timeout=10)
     hello = next(m for m in sim.sent if m["type"] == "hello")
     assert hello["caps"]["display"]["shape"] == "round" and "touch" in hello["caps"]["inputs"]

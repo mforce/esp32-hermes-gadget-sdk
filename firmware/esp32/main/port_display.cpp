@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "panel_box3.hpp"
 #include "panel_cores3.hpp"
+#include "panel_ws185.hpp"
 #include "freertos/task.h"
 
 namespace hgp {
@@ -34,6 +35,7 @@ bool SpiDisplay::on_trans_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event
 
 bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   cfg_ = cfg;
+  const bool qspi = cfg.controller == LcdController::St77916;
   bool ili9341 = false;
   bool cores3_e = false;
   if (cfg.controller == LcdController::Box3) {
@@ -46,7 +48,7 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
       ili9341 = true;
     }
   }
-  controller_name_ = ili9341 ? "ili9342" : "st7789";
+  controller_name_ = qspi ? "st77916" : ili9341 ? "ili9342" : "st7789";
   if (cfg.controller == LcdController::CoreS3) {
     if (!i2c_bus) return false;
     i2c_device_config_t device = {};
@@ -85,6 +87,7 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   }
   std::memset(fb_, 0, px * 2);
   done_ = xSemaphoreCreateBinary();
+  if (!done_) return false;
 
   spi_bus_config_t bus = {};
   bus.mosi_io_num = cfg.mosi;
@@ -92,6 +95,12 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   bus.sclk_io_num = cfg.sclk;
   bus.quadwp_io_num = -1;
   bus.quadhd_io_num = -1;
+  if (qspi) {
+    bus.data1_io_num = cfg.d1;
+    bus.data2_io_num = cfg.d2;
+    bus.data3_io_num = cfg.d3;
+    bus.flags = SPICOMMON_BUSFLAG_QUAD;
+  }
   bus.max_transfer_sz = cfg.width * bounce_rows_ * 2;
   ESP_ERROR_CHECK(spi_bus_initialize(kHost, &bus, SPI_DMA_CH_AUTO));
 
@@ -99,12 +108,29 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   io_cfg.dc_gpio_num = static_cast<gpio_num_t>(cfg.dc);
   io_cfg.cs_gpio_num = static_cast<gpio_num_t>(cfg.cs);
   io_cfg.pclk_hz = static_cast<uint32_t>(cfg.spi_mhz) * 1000 * 1000;
-  io_cfg.lcd_cmd_bits = 8;
+  io_cfg.lcd_cmd_bits = qspi ? 32 : 8;
+  io_cfg.flags.quad_mode = qspi;
   io_cfg.lcd_param_bits = 8;
   io_cfg.spi_mode = 0;
   io_cfg.trans_queue_depth = 4;
   io_cfg.on_color_trans_done = &SpiDisplay::on_trans_done;
   io_cfg.user_ctx = this;
+  uint8_t panel_id[4] = {};
+  if (qspi) {
+    const uint32_t full_speed = io_cfg.pclk_hz;
+    io_cfg.pclk_hz = 3000000;
+    if (esp_lcd_new_panel_io_spi(static_cast<esp_lcd_spi_bus_handle_t>(kHost), &io_cfg, &io_) != ESP_OK) return false;
+    const esp_err_t read = esp_lcd_panel_io_rx_param(io_, (0x0Bu << 24) | (0x04u << 8), panel_id, sizeof(panel_id));
+    esp_lcd_panel_io_del(io_);
+    io_ = nullptr;
+    io_cfg.pclk_hz = full_speed;
+    ESP_LOGI(TAG, "ST77916 panel ID %02x %02x %02x %02x", panel_id[0], panel_id[1], panel_id[2], panel_id[3]);
+    if (read != ESP_OK || panel_id[0] != 0 || panel_id[2] != 0x7f || panel_id[3] != 0x7f ||
+        (panel_id[1] != 0x7f && panel_id[1] != 0x02)) {
+      ESP_LOGE(TAG, "unknown ST77916 panel revision; refusing guessed initialization");
+      return false;
+    }
+  }
   ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(static_cast<esp_lcd_spi_bus_handle_t>(kHost), &io_cfg, &io_));
 
   esp_lcd_panel_dev_config_t panel_cfg = {};
@@ -113,7 +139,16 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   panel_cfg.bits_per_pixel = 16;
   panel_cfg.flags.reset_active_high = cfg.reset_active_high;
   ili9341_vendor_config_t vendor = {};
-  if (ili9341) {
+  st77916_vendor_config_t st_vendor = {};
+  if (qspi) {
+    const bool newer = panel_id[1] == 0x02;
+    st_vendor.flags.use_qspi_interface = 1;
+    st_vendor.init_cmds = newer ? kWs185PanelNew : kWs185PanelDefault;
+    st_vendor.init_cmds_size = newer ? sizeof(kWs185PanelNew) / sizeof(kWs185PanelNew[0]) :
+                                     sizeof(kWs185PanelDefault) / sizeof(kWs185PanelDefault[0]);
+    panel_cfg.vendor_config = &st_vendor;
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(io_, &panel_cfg, &panel_));
+  } else if (ili9341) {
     if (cfg.controller == LcdController::Box3) {
       vendor.init_cmds = kBox3PanelInit;
       vendor.init_cmds_size = sizeof(kBox3PanelInit) / sizeof(kBox3PanelInit[0]);
@@ -163,17 +198,29 @@ hg::DisplayInfo SpiDisplay::info() const {
   di.height = cfg_.height;
   di.swap_bytes = true;  // the panel wants big-endian RGB565
   di.has_backlight = cfg_.backlight >= 0 || static_cast<bool>(board_backlight);
+  di.round = cfg_.round;
   return di;
 }
 
 void SpiDisplay::flush(uint16_t y0, uint16_t y1) {
+  if (transfer_failed_) return;
   const int w = cfg_.width;
   for (int y = y0; y < y1; y += bounce_rows_) {
     int rows = std::min<int>(bounce_rows_, y1 - y);
     std::memcpy(bounce_, fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
-    esp_lcd_panel_draw_bitmap(panel_, 0, y, w, y + rows, bounce_);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, y, w, y + rows, bounce_) != ESP_OK) {
+      transfer_failed_ = true;
+      ESP_LOGE(TAG, "LCD transfer failed");
+      return;
+    }
     // The bounce buffer is reused: wait until the DMA transfer has finished.
-    xSemaphoreTake(done_, pdMS_TO_TICKS(100));
+    if (xSemaphoreTake(done_, pdMS_TO_TICKS(250)) != pdTRUE) {
+      // DMA completion is unknown. Do not free/reuse staging memory or submit
+      // further transfers. Keep the app responsive; manual reboot can recover.
+      transfer_failed_ = true;
+      ESP_LOGE(TAG, "LCD transfer timed out; display updates disabled until reboot");
+      return;
+    }
   }
 }
 

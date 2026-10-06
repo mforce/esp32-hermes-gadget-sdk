@@ -409,6 +409,35 @@ def test_first_approved_device_becomes_the_home_channel(gadget, make_sim):
     assert len(gadget.saved_homes) == 1
 
 
+@pytest.mark.parametrize("target", ["explicit-device", "home-channel", "env-home-channel"])
+def test_cron_delivers_to_a_paired_gadget(gadget, make_sim, monkeypatch, target):
+    from cron import scheduler, scheduler_delivery, scheduler_preflight
+    from gateway import config as gateway_config
+    from gateway.config import GatewayConfig, Platform
+
+    sim = _paired_sim(gadget, make_sim, name="Desk")
+    device_id = sim.status()["device_id"]
+    config = GatewayConfig(platforms={Platform("gadget"): gadget.adapter.config})
+    monkeypatch.setattr(gateway_config, "load_gateway_config", lambda: config)
+    monkeypatch.setattr(scheduler, "load_config", lambda: {"cron": {"wrap_response": False}})
+    if target == "env-home-channel":
+        gadget.adapter.config.home_channel = None
+        monkeypatch.setenv("GADGET_HOME_CHANNEL", device_id)
+    elif target == "home-channel":
+        assert sim.wait_for(lambda: gadget.adapter.config.home_channel is not None, timeout=5)
+    job = {"id": "gadget-reminder", "name": "Reminder",
+           "deliver": f"gadget:{device_id}" if target == "explicit-device" else "gadget"}
+
+    assert scheduler_preflight._preflight_check_delivery(job) is None
+    targets = scheduler_delivery._resolve_delivery_targets(job)
+    assert [(t["platform"], t["chat_id"], t.get("thread_id")) for t in targets] == [
+        ("gadget", device_id, None)]
+    error = scheduler_delivery._deliver_result(
+        job, "Time to stretch", adapters={Platform("gadget"): gadget.adapter}, loop=gadget.loop)
+    assert error is None
+    assert sim.wait_for(lambda: (sim.last_received("reply") or {}).get("text") == "Time to stretch", timeout=10)
+
+
 def test_a_home_channel_set_in_the_profile_is_left_alone(gadget, make_sim):
     """GADGET_HOME_CHANNEL may live in a profile's own .env, which a multiplexed gateway keeps out of
     os.environ: the adapter reads it through the profile's secret scope."""

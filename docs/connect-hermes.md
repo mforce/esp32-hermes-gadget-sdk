@@ -27,6 +27,8 @@ hermes-gadget sim --url ws://127.0.0.1:8765/gadget --name "Desk Gadget"
 
 If Hermes runs on another computer, replace the URL with the address from `hermes gadget info`. That computer's firewall must allow the gadget port, 8765 by default.
 
+If that port is already in use, [change the gadget port](hermes-integration.md#change-the-gadget-port), restart the gateway, and update the device's server address. Configuration edits and plugin toggles do not change the running listener's port.
+
 ## 3. Approve the device
 
 When the device shows a pairing code, run:

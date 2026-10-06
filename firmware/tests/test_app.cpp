@@ -1065,6 +1065,59 @@ TEST("settings: title hold and menu swipe work without starting a recording") {
   CHECK(r.app.screen() == hg::Screen::Ready);
 }
 
+TEST("settings: round header redraws its return label and restores settings label") {
+  FakeHal display;
+  display.make_round(360);
+  hg::Ui ui(display);
+  hg::UiModel m;
+  m.screen = hg::Screen::Ready;
+  m.link = hg::Link::Online;
+  ui.render(m);
+  const auto top = [&]() {
+    return std::vector<uint16_t>(display.fb.begin() + 53 * 360,
+                                 display.fb.begin() + 89 * 360);
+  };
+  const auto ready = top();
+  m.screen = hg::Screen::Settings;
+  ui.render(m);
+  CHECK(top() != ready);
+  m.screen = hg::Screen::Ready;
+  ui.render(m);
+  CHECK(top() == ready);
+}
+
+TEST("settings: round 360 target reserves its full visible area from TALK") {
+  Rig r(Rig::touch_profile());
+  r.fake.make_round(360);
+  r.bring_online(true);
+  CHECK(r.app.settings_title_hit(120, 53));
+  CHECK(r.app.settings_title_hit(239, 88));
+  CHECK(!r.app.settings_title_hit(119, 70));
+  CHECK(!r.app.settings_title_hit(240, 70));
+  CHECK(!r.app.settings_title_hit(180, 89));
+  hg::TouchGestures touch(r.app);
+  touch.update(true, 180, 80, r.fake.clock);
+  r.advance(200);
+  touch.tick(r.fake.clock);
+  CHECK(!r.fake.mic_on);
+  r.advance(900);
+  touch.tick(r.fake.clock);
+  touch.update(false, 0, 0, r.fake.clock);
+  CHECK(r.app.settings_open());
+  CHECK(!r.fake.mic_on);
+  touch.update(true, 180, 80, r.fake.clock);
+  r.advance(1100);
+  touch.tick(r.fake.clock);
+  touch.update(false, 0, 0, r.fake.clock);
+  CHECK(!r.app.settings_open());
+  touch.update(true, 180, 180, r.fake.clock);
+  r.advance(200);
+  touch.tick(r.fake.clock);
+  CHECK(r.fake.mic_on);
+  r.app.console("cancel");
+  touch.update(false, 0, 0, r.fake.clock);
+}
+
 TEST("power: idle screen dims, sleeps and consumes the wake input without recording") {
   Rig r;
   r.fake.backlight = true;
@@ -1126,6 +1179,24 @@ TEST("power: failed readings replace stale data and shutdown requires a second l
   CHECK_EQ(battery.shutdowns, 0);
   r.app.console("talk"); r.app.console("release");
   CHECK_EQ(battery.shutdowns, 1);
+}
+
+TEST("power: a peripheral rail cannot be selected as device power-off") {
+  struct PeripheralRail : hg::Power {
+    int shutdowns = 0;
+    std::optional<hg::PowerStatus> read() override { return hg::PowerStatus{}; }
+    bool can_power_off() const override { return false; }
+    bool power_off() override { ++shutdowns; return true; }
+  } rail;
+  Rig r;
+  r.hal.power = &rail;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 10; ++i) r.app.console("cancel");
+  CHECK(r.app.model().detail != "Power off");
+  r.app.console("talk"); r.app.console("release");
+  r.app.console("talk"); r.app.console("release");
+  CHECK_EQ(rail.shutdowns, 0);
 }
 
 TEST("Wi-Fi setup: bounded credentials require the current session and never replace valid output on failure") {

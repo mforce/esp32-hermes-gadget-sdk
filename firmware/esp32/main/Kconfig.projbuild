@@ -39,6 +39,10 @@ menu "Hermes Gadget"
             bool "M5Stack CoreS3 (LCD, touch, AW88298 + ES7210)"
         config HG_BOARD_WS_ESP32S3_LCD_154
             bool "Waveshare ESP32-S3-LCD-1.54 (ST7789 240x240, ES8311 + ES7210 codecs)"
+        config HG_BOARD_WS_ESP32S3_TOUCH_LCD_185C_V2
+            bool "Waveshare ESP32-S3-Touch-LCD-1.85C V2 (experimental, ST77916, CST816, codecs)"
+        config HG_BOARD_T_DISPLAY_S3
+            bool "LilyGO T-Display-S3 (ST7789 320x170 on an i80 parallel bus, no audio)"
         config HG_BOARD_CUSTOM
             bool "Custom pins (configure below)"
     endchoice

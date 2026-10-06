@@ -20,6 +20,7 @@ hgp::EspSystem g_system;
 hgp::NvsStorage g_storage;
 hgp::WsTransport g_transport;
 hgp::SpiDisplay g_display;
+hgp::ParallelDisplay g_parallel;
 hgp::AmoledDisplay g_amoled;
 hgp::I2sMic g_mic;
 hgp::I2sSpeaker g_speaker;
@@ -171,26 +172,38 @@ extern "C" void app_main(void) {
   if (latch_power) hal.power = &g_latch_power;
   if (g_updater.capacity()) hal.updater = &g_updater;
   i2c_master_bus_handle_t i2c_bus = hgp::i2c::bus(board.i2c);
-  const bool peripherals_ready = !board.cores3 || g_cores3.begin(i2c_bus);
+  const bool peripherals_ready = (!board.cores3 || g_cores3.begin(i2c_bus)) &&
+      (!board.tca9554_resets || hgp::ws185_reset_peripherals(i2c_bus));
+  if (!peripherals_ready) ESP_LOGE(TAG, "peripheral reset initialization failed");
   if (board.cores3 && peripherals_ready)
     g_display.board_backlight = [](uint8_t percent) { g_cores3.set_backlight(percent); };
-  if (peripherals_ready && board.lcd.enabled && g_display.begin(board.lcd, i2c_bus)) hal.display = &g_display;
-  else if (board.amoled.enabled && g_amoled.begin(board.amoled)) hal.display = &g_amoled;
+  if (peripherals_ready && board.lcd.enabled) {
+    if (board.lcd.bus.type == hgp::LcdBus::Type::I80) {
+      if (g_parallel.begin(board.lcd, hgp::lcd_power_pin(board))) hal.display = &g_parallel;
+    } else if (g_display.begin(board.lcd, i2c_bus)) {
+      hal.display = &g_display;
+    }
+  } else if (board.amoled.enabled && g_amoled.begin(board.amoled)) {
+    hal.display = &g_amoled;
+  }
   if (board.mic.enabled && g_mic.begin(board.mic)) hal.mic = &g_mic;
   if (board.speaker.enabled && g_speaker.begin(board.speaker)) hal.speaker = &g_speaker;
   if (board.axp2101 && g_power.begin(i2c_bus)) hal.power = &g_power;
   const bool audio_power = peripherals_ready && (!board.axp_audio_supply || g_power.enable_audio_supply());
   if (!audio_power) ESP_LOGE(TAG, "audio supply unavailable");
   if (board.codec.enabled && audio_power && g_codec.begin(board.codec, i2c_bus)) {
-    if (g_codec_mic.begin(g_codec.in())) hal.mic = &g_codec_mic;
-    if (g_codec_speaker.begin(g_codec.out())) hal.speaker = &g_codec_speaker;
+    if (g_codec_mic.begin(g_codec.in(), board.codec.stereo32)) hal.mic = &g_codec_mic;
+    if (g_codec_speaker.begin(g_codec.out(), board.codec.stereo32, board.codec.stereo32 ? board.codec.pa : -1)) hal.speaker = &g_codec_speaker;
   }
   g_buttons.begin(board.buttons);
   const bool touch = peripherals_ready && (board.touch.enabled || board.pwr_key.enabled) &&
                      g_touch.begin(board.touch, board.pwr_key, i2c_bus);
 
   hgp::diag::Parts parts;
-  parts.display = hal.display == &g_display ? g_display.controller_name() : hal.display == &g_amoled ? "co5300" : "none";
+  parts.display = hal.display == &g_display ? g_display.controller_name()
+                      : hal.display == &g_parallel ? "st7789-i80"
+                      : hal.display == &g_amoled ? "co5300"
+                                                : "none";
   parts.mic = hal.mic == &g_codec_mic ? "es7210" : hal.mic == &g_mic ? "i2s" : "none";
   parts.speaker = hal.speaker == &g_codec_speaker ?
       (board.codec.speaker == hgp::SpeakerCodec::Aw88298 ? "aw88298" : "es8311") :
@@ -231,6 +244,11 @@ extern "C" void app_main(void) {
   app.on_wifi_setup_close = [] { g_wifi.stop_setup(); };
   app.on_diag = [](hg::json::Value& report) {
     hgp::diag::report(report);
+    if (hgp::board_config().tca9554_resets) {
+      report.set("firmware_target_revision", "Rev2.0").set("validation", "experimental; hardware unvalidated")
+          .set("touch_controller", "cst816").set("audio_format", "RMNM stereo32 to mono16")
+          .set("software_aec", false);
+    }
     report.set("ota", g_updater.describe());
   };
   app.recent_log = &hgp::diag::recent_log;

@@ -64,6 +64,7 @@ def register(ctx) -> None:
         install_hint="websockets is a core Hermes dependency; reinstall Hermes if it is missing",
         allowed_users_env="GADGET_ALLOWED_USERS",
         allow_all_env="GADGET_ALLOW_ALL_USERS",
+        cron_deliver_env_var="GADGET_HOME_CHANNEL",
         max_message_length=4000,
         emoji="📟",
         pii_safe=True,
