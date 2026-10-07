@@ -1761,3 +1761,71 @@ TEST("touch: the profile chip and the settings target never share a point, and e
     CHECK(!r.app.settings_open());
   }
 }
+
+namespace {
+// What a fresh render of `m` paints on a round panel `size` pixels across.
+std::vector<uint16_t> render_round(int size, const hg::UiModel& m) {
+  FakeHal panel;
+  panel.make_round(size);
+  hg::Ui ui(panel);
+  ui.render(m);
+  return panel.fb;
+}
+}  // namespace
+
+TEST("ui: on round panels the profile chip stays in the bottom band, clear of the SETTINGS target") {
+  for (int size : {360, 466}) {
+    FakeHal panel;
+    panel.make_round(size);
+    hg::Ui ui(panel);
+    hg::UiModel m;
+    m.screen = hg::Screen::Ready;
+    m.link = hg::Link::Online;
+    m.hero = true;
+    m.headline = "Hi, I'm Hermes";
+    m.profile = "default";
+    const int bottom = (size - ui.area().height) / 2 + ui.area().height - ui.layout().bottom_h;
+    int chip = 0, shared = 0, above = 0;
+    for (int y = 0; y < size; ++y)
+      for (int x = 0; x < size; ++x)
+        if (ui.profile_hit(m, x, y)) {  // the raw geometry, before the app takes the chip out of the target
+          ++chip;
+          shared += ui.title_hit(x, y);
+          above += y < bottom;
+        }
+    CHECK(chip > 0);
+    CHECK_EQ(shared, 0);
+    CHECK_EQ(above, 0);
+    for (bool hold : {true, false}) {
+      m.settings_hold = hold;
+      hg::UiModel plain = m;
+      plain.profile.clear();
+      const std::vector<uint16_t> with = render_round(size, m), without = render_round(size, plain);
+      int painted = 0, painted_above = 0;
+      for (size_t i = 0; i < with.size(); ++i)
+        if (with[i] != without[i]) {
+          ++painted;
+          painted_above += static_cast<int>(i) / size < bottom;
+        }
+      CHECK(painted > 0);
+      CHECK_EQ(painted_above, 0);
+    }
+  }
+}
+
+TEST("touch: a profile hold that ends after Wi-Fi setup opens does not switch") {
+  Rig r(Rig::touch_profile());
+  r.app.on_wifi_setup = [] { return "Temporary setup network"; };
+  r.bring_online_with_profiles();
+  auto [x, y] = chip_point(r, 320, 240);
+  CHECK(x >= 0);
+  hg::TouchGestures touch(r.app);
+  touch.update(true, x, y, r.fake.clock);
+  r.advance(200);
+  CHECK(r.app.start_wifi_setup());
+  r.advance(900);
+  touch.tick(r.fake.clock);
+  touch.update(false, 0, 0, r.fake.clock);
+  CHECK(r.fake.last("profile.select") == nullptr);
+  CHECK(!r.app.next_agent_profile());
+}
