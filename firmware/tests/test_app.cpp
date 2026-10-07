@@ -1726,3 +1726,38 @@ TEST("touch: the first touch on the profile chip of a sleeping display only wake
   CHECK(r.fake.last("profile.select") == nullptr);
   CHECK(r.app.status_json().find("\"display_sleeping\":false") != std::string::npos);
 }
+
+TEST("touch: the profile chip and the settings target never share a point, and each hold does its own thing") {
+  for (int round = 0; round < 2; ++round) {
+    const int w = round ? 466 : 320, h = round ? 466 : 240;
+    Rig r(Rig::touch_profile());
+    if (round) r.fake.make_round(w);
+    r.bring_online_with_profiles();
+    std::pair<int, int> chip{-1, -1}, settings{-1, -1};
+    int shared = 0;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        const bool on_chip = r.app.profile_hit(x, y), on_settings = r.app.settings_title_hit(x, y);
+        shared += on_chip && on_settings;
+        if (on_chip && chip.first < 0) chip = {x, y};
+        if (on_settings && settings.first < 0) settings = {x, y};
+      }
+    CHECK_EQ(shared, 0);
+    CHECK(chip.first >= 0);
+    CHECK(settings.first >= 0);
+    hg::TouchGestures touch(r.app);
+    touch.update(true, settings.first, settings.second, r.fake.clock);
+    r.advance(1100);
+    touch.tick(r.fake.clock);
+    touch.update(false, 0, 0, r.fake.clock);
+    CHECK(r.app.settings_open());
+    CHECK(r.fake.last("profile.select") == nullptr);
+    r.app.close_settings();
+    touch.update(true, chip.first, chip.second, r.fake.clock);
+    r.advance(1100);
+    touch.tick(r.fake.clock);
+    touch.update(false, 0, 0, r.fake.clock);
+    CHECK(r.fake.last("profile.select") != nullptr);
+    CHECK(!r.app.settings_open());
+  }
+}
