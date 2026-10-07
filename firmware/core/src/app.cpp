@@ -449,7 +449,7 @@ std::string App::agent_profile_name() const {
 
 bool App::next_agent_profile() {
   if (phase_ != Phase::Online || !paired_ || agent_profiles_.size() < 2 || mode_ != Mode::Idle ||
-      prompt_showing() || ota_busy())
+      prompt_showing() || ota_busy() || wifi_setup_open())
     return false;
   size_t i = 0;
   while (i < agent_profiles_.size() && agent_profiles_[i].id != agent_profile_) ++i;
