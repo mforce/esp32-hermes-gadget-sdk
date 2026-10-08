@@ -29,6 +29,7 @@ Tap CANCEL to move to the next item, then tap TALK to change it. On a touchscree
 | Speaker volume | Change volume in steps of 10 percent |
 | Screen brightness | Choose 10, 25, 50, 75, or 100 percent when the display supports it |
 | Talk mode | Choose hold-to-talk or tap-to-talk with silence detection |
+| Hermes profile | Switch to the next Hermes profile; shown only when Hermes serves several |
 | Microphone check | Show the live input level; nothing is saved or sent to Hermes |
 | Speaker check | Play a short, quiet tone at the current volume |
 | Display check | Show red, green, blue, white, and black bands |
@@ -38,6 +39,8 @@ Tap CANCEL to move to the next item, then tap TALK to change it. On a touchscree
 | Screen timeout | Choose always on, 30, 60, 120, or 300 seconds |
 | Power off | Select twice to shut down a board with a power driver |
 | Wi-Fi setup | Start [phone-based setup](setup-board.md#set-up-wi-fi-with-your-phone) on ESP32 boards, with a QR code for the temporary network where the screen has room |
+
+When Hermes serves several profiles, **Hermes profile** in settings switches to the next one. On a touchscreen, the Ready screen also shows the current profile's name as a small chip; hold it for one second to switch. The device asks Hermes and changes only when Hermes confirms; if it is busy, try again when the reply is done. The device keeps the profile across restarts.
 
 Volume, brightness, talk mode, and screen timeout survive restarts. Unavailable drivers show as unavailable. These checks help you test the hardware; a completed tone does not prove that a physical speaker produced sound.
 

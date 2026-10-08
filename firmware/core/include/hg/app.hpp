@@ -99,6 +99,12 @@ class App {
   void close_settings();
   bool settings_open() const { return menu_ != Menu::Closed; }
   bool settings_title_hit(int x, int y) const;
+  bool profile_hit(int x, int y) const;
+  // Hermes profiles: which one answers this device. Switching asks the server; the
+  // device keeps a profile only once Hermes confirms it.
+  bool next_agent_profile();
+  const std::string& agent_profile() const { return agent_profile_; }
+  std::string agent_profile_name() const;
   // Returns true when this input only wakes a sleeping display.
   bool wake_display();
   bool start_wifi_setup();
@@ -169,6 +175,9 @@ class App {
   void h_ota_begin(const json::Value& m);
   void h_ota_end(const json::Value& m);
   void h_ota_abort(const json::Value& m);
+  void h_profile(const json::Value& m);
+  void set_agent_profile(const std::string& id);
+  void profile_notice(std::string text);
 
   // firmware updates
   void ota_chunk(uint8_t stream, uint16_t seq, const uint8_t* data, size_t len);
@@ -235,8 +244,14 @@ class App {
   TalkMode talk_mode_ = TalkMode::Hold;
   uint8_t volume_ = 70;
   uint8_t brightness_ = 100;
-  enum class Menu : uint8_t { Closed, Volume, Brightness, TalkMode, Microphone, Speaker, Display, Inputs, Info,
+  struct AgentProfile {
+    std::string id, name;
+  };
+  std::vector<AgentProfile> agent_profiles_;  // offered in welcome; empty = no switching
+  std::string agent_profile_ = "default";
+  enum class Menu : uint8_t { Closed, Volume, Brightness, TalkMode, Profile, Microphone, Speaker, Display, Inputs, Info,
                               Power, IdleTimer, PowerOff, WifiSetup, Back };
+  bool menu_visible(Menu item) const;
   enum class HardwareCheck : uint8_t { None, Microphone, Speaker, Display, Inputs };
   Menu menu_ = Menu::Closed;
   HardwareCheck hardware_check_ = HardwareCheck::None;
