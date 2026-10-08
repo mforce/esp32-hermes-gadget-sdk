@@ -1,4 +1,5 @@
 #include "app_rig.hpp"
+#include "hg/canvas.hpp"
 
 using namespace hg_test;
 
@@ -181,6 +182,23 @@ TEST("touch: a long profile name is cut to fit and its whole chip stays on the p
         CHECK((cx - c) * (cx - c) + (cy - c) * (cy - c) < c * c);  // every corner inside the circle
     }
   }
+}
+
+TEST("touch: on a panel with rounded corners the profile chip stays clear of the link dot") {
+  Rig r(Rig::touch_profile());
+  r.fake.corner_inset = 18;  // the AMOLED-1.8's top bar padding
+  r.bring_online_with_profiles();
+  r.advance(200);
+  constexpr uint16_t kGreen = hg::rgb565(61, 214, 140);  // the online dot
+  int dot_left = 320, chip_right = -1;
+  for (int y = 0; y < 20; ++y)
+    for (int x = 0; x < 320; ++x) {
+      if (r.fake.fb[static_cast<size_t>(y * 320 + x)] == kGreen) dot_left = std::min(dot_left, x);
+      if (r.app.profile_hit(x, y)) chip_right = std::max(chip_right, x);
+    }
+  CHECK(dot_left < 320);
+  CHECK(chip_right >= 0);
+  CHECK(chip_right < dot_left);
 }
 
 TEST("touch: the first touch on the profile chip of a sleeping display only wakes it") {

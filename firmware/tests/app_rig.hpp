@@ -63,6 +63,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   // Display
   int width = 320, height = 240;
   bool round = false;
+  int corner_inset = 0;
   bool backlight = false;
   int brightness = 0, volume = 0;
   std::vector<uint16_t> fb = std::vector<uint16_t>(320 * 240, 0);
@@ -73,6 +74,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
     d.width = static_cast<uint16_t>(width);
     d.height = static_cast<uint16_t>(height);
     d.round = round;
+    d.corner_inset = static_cast<uint8_t>(corner_inset);
     d.has_backlight = backlight;
     return d;
   }
