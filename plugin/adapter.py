@@ -259,9 +259,9 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
 
     def _owner_trusts(self, device_id: str) -> bool:
         """The default profile's verdict on this device, ignoring routes; only a literal True counts."""
-        if self._owner_check is None and (runner := getattr(self, "gateway_runner", None)) is not None:
-            self._owner_check = runner._make_adapter_auth_check(self.platform, profile_name="default")
         try:
+            if self._owner_check is None and (runner := getattr(self, "gateway_runner", None)) is not None:
+                self._owner_check = runner._make_adapter_auth_check(self.platform, profile_name="default")
             return self._owner_check is not None and self._owner_check(device_id, "dm", device_id) is True
         except Exception:
             logger.warning("[%s] authorization check failed for %s", self.name, device_id, exc_info=True)
@@ -308,11 +308,11 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
     def _grant(device_id: str, name: str, profile: str) -> bool:
         """Approve a device this adapter already trusts in ``profile``'s own pairing store, which is
         what the gateway checks for a turn routed there (owner decision: pair once, use every profile)."""
-        from gateway.pairing import PairingStore
-        from gateway.run import _profile_runtime_scope
-        from hermes_cli.profiles import get_profile_dir
-
         try:
+            from gateway.pairing import PairingStore
+            from gateway.run import _profile_runtime_scope
+            from hermes_cli.profiles import get_profile_dir
+
             # The target profile's scope, so the allowlist mirror in approve_code touches that
             # profile's .env, not the default one's.
             with _GRANT_LOCK, _profile_runtime_scope(get_profile_dir(profile)):

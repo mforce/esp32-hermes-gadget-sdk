@@ -152,7 +152,7 @@ def test_an_unknown_profile_falls_back_to_the_launch_home(routing_rig):
 class _RawDevice:
     """A device speaking the handshake by hand, so a test chooses exactly what it claims in hello."""
 
-    def __init__(self, url, key, caps):
+    def __init__(self, url, key, caps, profile=None):
         import base64
 
         from websockets.sync.client import connect
@@ -161,7 +161,8 @@ class _RawDevice:
         device = protocol.device_id_for_key(key)
         self.ws = connect(url, subprotocols=["hermes-gadget.v1"])
         self.ws.send(json.dumps({"type": "hello", "proto": 1, "device_id": device, "name": "Kitchen",
-                                 "board": "raw", "firmware": "0.1.0", "caps": caps}))
+                                 "board": "raw", "firmware": "0.1.0", "caps": caps,
+                                 **({"profile": profile} if profile else {})}))
         challenge = json.loads(self.ws.recv(timeout=5))
         auth = ({"mac": protocol.auth_mac(key, device, challenge["nonce"])} if challenge["enrolled"]
                 else {"key": base64.b64encode(key).decode()})
@@ -213,7 +214,7 @@ def live_rig(hermes_home, loop_thread, tmp_path, monkeypatch):
 
     yield types.SimpleNamespace(
         runner=runner, adapter=adapter, device=device, events=events, run=loop_thread.run, admits=admits,
-        approve_default=approve_default, connect=lambda caps: _RawDevice(url, key, caps))
+        approve_default=approve_default, connect=lambda caps, profile=None: _RawDevice(url, key, caps, profile))
     loop_thread.run(adapter.cancel_background_tasks())
     loop_thread.run(adapter.disconnect())
 
@@ -345,3 +346,37 @@ def test_forget_from_a_stale_store_keeps_the_device_bound(live_rig):
         assert legacy.welcome["paired"] is False
         rig.run(rig.adapter.on_text(rig.adapter.hub.get(rig.device), "m1", "after-forget"))
         assert _admitted(rig) == []
+
+
+@pytest.mark.parametrize("hermes", ["no factory", "old factory signature"])
+def test_a_hermes_without_the_owner_check_refuses_instead_of_dropping_the_device(live_rig, monkeypatch, hermes):
+    rig = live_rig
+    rig.approve_default()
+    if hermes == "no factory":
+        owner = next(c for c in type(rig.runner).__mro__ if "_make_adapter_auth_check" in c.__dict__)
+        monkeypatch.delattr(owner, "_make_adapter_auth_check")
+    else:
+        monkeypatch.setattr(rig.runner, "_make_adapter_auth_check", lambda platform: None)
+    with rig.connect({"profiles": True}, profile="ops") as device:
+        assert device.welcome["type"] == "welcome"
+        assert device.welcome["paired"] is False and device.welcome["profile"] == "default"
+        assert rig.adapter.hub.get(rig.device) is not None  # still connected
+    assert not rig.runner.pairing_stores["ops"].is_approved("gadget", rig.device)
+    assert all(e.text == "/status" and e.source.profile == "default" for e in rig.events)  # the pairing trigger only
+
+
+def test_a_hermes_without_profile_dirs_refuses_the_switch_and_keeps_the_device(live_rig, monkeypatch):
+    import hermes_cli.profiles as profiles
+
+    rig = live_rig
+    rig.approve_default()
+    with rig.connect({"profiles": True}) as device:
+        assert device.welcome["paired"] is True
+        monkeypatch.delattr(profiles, "get_profile_dir")
+        device.ws.send(json.dumps({"type": "profile.select", "profile": "ops"}))
+        while (reply := json.loads(device.ws.recv(timeout=5)))["type"] != "profile":
+            pass
+        assert reply == {"type": "profile", "profile": "default", "error": "unpaired"}
+        assert rig.adapter.hub.get(rig.device) is not None  # still connected
+    assert not rig.runner.pairing_stores["ops"].is_approved("gadget", rig.device)
+    assert all(e.text == "/status" and e.source.profile == "default" for e in rig.events)  # the pairing trigger only
